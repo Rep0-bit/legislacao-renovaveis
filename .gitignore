@@ -9,14 +9,21 @@ __pycache__/
 .venv/
 venv/
 
-# Dados gerados pela aplicação
-data/index/
-data/meta/
-data/text/
-data/debug/
-data/index/reports/
+# Dados gerados
+data/
+data/**
 
-# Bases de dados
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+
+
+# Arquivo
+src/collectors/old versions/
+
+
+# DBs
 *.db
 *.sqlite
 *.sqlite3
