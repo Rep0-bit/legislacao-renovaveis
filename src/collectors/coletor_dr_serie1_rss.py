@@ -7,6 +7,7 @@ import email.utils
 import json
 import logging
 import re
+import sys
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
@@ -1179,7 +1180,7 @@ def _filter_items(
 # Main collector
 # -----------------------------
 def collect(
-    keywords: list[str],
+    keywords: list[str] | None,
     *,
     days: int = 90,
     force_full_window: bool = False,
@@ -1192,8 +1193,38 @@ def collect(
     include_types: list[str] | None = None,
     exclude_types: list[str] | None = None,
     strict_types: bool = False,
+    profile: str | None = None,
 ) -> None:
     init_db()
+
+    # B8: profiles (presets) — útil quando o coletor é chamado via API/testes.
+    # Aqui não temos sys.argv, por isso a precedência é:
+    #   parâmetros explícitos da chamada > profile > defaults.
+    if profile:
+        cfg = PROFILES.get(profile)
+        if not cfg:
+            raise ValueError(f"Profile desconhecido: {profile}. Disponíveis: {', '.join(sorted(PROFILES))}")
+        if (days == 90) and ("days" in cfg):
+            days = int(cfg["days"])
+        if (include_types is None) and ("types" in cfg):
+            include_types = [p for p in str(cfg.get("types") or "").split(",") if p.strip()]
+        if (exclude_types is None) and ("exclude_types" in cfg):
+            exclude_types = [p for p in str(cfg.get("exclude_types") or "").split(",") if p.strip()]
+        if (not strict_types) and ("strict_types" in cfg):
+            strict_types = bool(cfg.get("strict_types"))
+        if (pdf_fallback_pages == 2) and ("pdf_fallback_pages" in cfg):
+            pdf_fallback_pages = int(cfg["pdf_fallback_pages"])
+        if keywords is None:
+            if cfg.get("no_keywords") is True:
+                keywords_enabled = False
+                keywords = []
+            elif ("keywords" in cfg) and (cfg.get("keywords") is not None):
+                keywords = list(cfg.get("keywords") or [])
+            else:
+                keywords = list(DEFAULT_KEYWORDS)
+
+    if keywords is None:
+        keywords = list(DEFAULT_KEYWORDS)
 
     include_types = include_types or []
     exclude_types = exclude_types or []
@@ -1900,8 +1931,104 @@ def collect(
         logger.info("🧾 Relatório não gerado (nada processado nesta execução).")
 
 
+DEFAULT_KEYWORDS = [
+    "energia renovável",
+    "energias renováveis",
+    "autoconsumo",
+    "UPAC",
+    "UPP/UPAC",
+    "comunidades de energia",
+    "hidrogénio",
+    "solar",
+    "fotovolta",
+    "eólico",
+    "armazenamento",
+    "BESS",
+    "onshore",
+    "offshore",
+    "biomassa",
+    "garantias de origem",
+    "TRC ",
+    "Título de Reserva de Capacidade",
+    "Sistema Elétrico Nacional",
+    "sistema elétrico nacional",
+    "rede elétrica",
+    "produção renovável",
+    "carbono",
+]
+
+PROFILES: dict[str, dict] = {
+    "renovaveis_portarias": {
+        "days": 14,
+        "types": "portaria",
+        # keywords: usa DEFAULT_KEYWORDS
+        "pdf_fallback_pages": 8,
+        "no_keywords": False,
+    },
+    "renovaveis_todos": {
+        "days": 14,
+        "types": "",
+        # keywords: usa DEFAULT_KEYWORDS
+        "pdf_fallback_pages": 8,
+        "no_keywords": False,
+    },
+    "sem_keywords_portarias": {
+        "days": 14,
+        "types": "portaria",
+        "pdf_fallback_pages": 8,
+        "no_keywords": True,
+    },
+}
+
+
+def apply_profile_to_args(args: argparse.Namespace) -> None:
+    """Aplica defaults de um --profile, sem sobrescrever flags explícitas.
+
+    Precedência:
+      flags explícitas (presentes em sys.argv) > profile > defaults do argparse
+    """
+    profile = (getattr(args, "profile", "") or "").strip()
+    if not profile:
+        return
+    cfg = PROFILES.get(profile)
+    if not cfg:
+        raise SystemExit(f"Profile desconhecido: {profile}. Disponíveis: {', '.join(sorted(PROFILES))}")
+
+    def has(flag: str) -> bool:
+        return flag in sys.argv
+
+    if (not has("--days")) and ("days" in cfg):
+        args.days = int(cfg["days"])
+
+    if (not has("--types")) and ("types" in cfg):
+        args.types = str(cfg.get("types", ""))
+    if (not has("--exclude-types")) and ("exclude_types" in cfg):
+        args.exclude_types = str(cfg.get("exclude_types", ""))
+
+    if (not has("--strict-types")) and ("strict_types" in cfg):
+        args.strict_types = bool(cfg.get("strict_types"))
+
+    if (not has("--pdf-fallback-pages")) and ("pdf_fallback_pages" in cfg):
+        args.pdf_fallback_pages = int(cfg["pdf_fallback_pages"])
+
+    # keywords vs no-keywords: se user passou flags explícitas, não mexemos
+    if has("--no-keywords") or has("--keywords"):
+        return
+    if cfg.get("no_keywords") is True:
+        args.no_keywords = True
+    elif cfg.get("no_keywords") is False:
+        args.no_keywords = False
+    if ("keywords" in cfg) and (cfg.get("keywords") is not None):
+        args.keywords = list(cfg.get("keywords") or [])
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--profile",
+        default="",
+        help="Preset de parâmetros (ex.: renovaveis_portarias). Flags explícitas ganham ao profile.",
+    )
     ap.add_argument("--days", type=int, default=90, help="Janela temporal em dias (ex.: 90)")
     ap.add_argument(
         "--force-full-window", action="store_true", help="Ignora checkpoint e reprocessa toda a janela"
@@ -1931,31 +2058,7 @@ def main() -> None:
     ap.add_argument(
         "--keywords",
         nargs="*",
-        default=[
-            "energia renovável",
-            "energias renováveis",
-            "autoconsumo",
-            "UPAC",
-            "UPP/UPAC",
-            "comunidades de energia",
-            "hidrogénio",
-            "solar",
-            "fotovolta",
-            "eólico",
-            "armazenamento",
-            "BESS",
-            "onshore",
-            "offshore",
-            "biomassa",
-            "garantias de origem",
-            "TRC ",
-            "Título de Reserva de Capacidade",
-            "Sistema Elétrico Nacional",
-            "sistema elétrico nacional",
-            "rede elétrica",
-            "produção renovável",
-            "carbono",
-        ],
+        default=DEFAULT_KEYWORDS,
         help="Lista de palavras-chave",
     )
     ap.add_argument(
@@ -1975,6 +2078,8 @@ def main() -> None:
     )
 
     args = ap.parse_args()
+
+    apply_profile_to_args(args)
 
     setup_logging(args.log_level or ("DEBUG" if args.debug else None))
 
@@ -2017,6 +2122,7 @@ def main() -> None:
         include_types=include_types,
         exclude_types=exclude_types,
         strict_types=getattr(args, "strict_types", False),
+        profile=(args.profile or None),
     )
 
 
