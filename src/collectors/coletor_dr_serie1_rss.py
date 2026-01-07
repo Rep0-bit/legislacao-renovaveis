@@ -1201,9 +1201,10 @@ def collect(
     # Aqui não temos sys.argv, por isso a precedência é:
     #   parâmetros explícitos da chamada > profile > defaults.
     if profile:
-        cfg = PROFILES.get(profile)
+        profiles = load_profiles()
+        cfg = profiles.get(profile)
         if not cfg:
-            raise ValueError(f"Profile desconhecido: {profile}. Disponíveis: {', '.join(sorted(PROFILES))}")
+            raise ValueError(f"Profile desconhecido: {profile}. Disponíveis: {', '.join(sorted(profiles))}")
         if (days == 90) and ("days" in cfg):
             days = int(cfg["days"])
         if (include_types is None) and ("types" in cfg):
@@ -2016,11 +2017,14 @@ def load_profiles(*, extra_path: Path | None = None) -> dict[str, dict]:
         return dict(DEFAULT_PROFILES)
 
 
-# Profiles efetivos (externos, com fallback)
-PROFILES: dict[str, dict] = load_profiles()
+# Profiles efetivos (externos, com fallback) são carregados em runtime via load_profiles().
 
 
-def apply_profile_to_args(args: argparse.Namespace) -> None:
+def apply_profile_to_args(
+    args: argparse.Namespace,
+    *,
+    extra_path: Path | None = None,
+) -> None:
     """Aplica defaults de um --profile, sem sobrescrever flags explícitas.
 
     Precedência:
@@ -2029,9 +2033,60 @@ def apply_profile_to_args(args: argparse.Namespace) -> None:
     profile = (getattr(args, "profile", "") or "").strip()
     if not profile:
         return
-    cfg = PROFILES.get(profile)
+
+    profiles = load_profiles(extra_path=extra_path)
+    cfg = profiles.get(profile)
     if not cfg:
-        raise SystemExit(f"Profile desconhecido: {profile}. Disponíveis: {', '.join(sorted(PROFILES))}")
+        raise SystemExit(f"Profile desconhecido: {profile}. Disponíveis: {', '.join(sorted(profiles))}")
+
+    def has(flag: str) -> bool:
+        return flag in sys.argv
+
+    if (not has("--days")) and ("days" in cfg):
+        args.days = int(cfg["days"])
+
+    if (not has("--types")) and ("types" in cfg):
+        v = cfg.get("types", "")
+        if isinstance(v, list):
+            args.types = ",".join(str(x).strip() for x in v if str(x).strip())
+        else:
+            args.types = str(v or "")
+
+    if (not has("--exclude-types")) and ("exclude_types" in cfg):
+        v = cfg.get("exclude_types", "")
+        if isinstance(v, list):
+            args.exclude_types = ",".join(str(x).strip() for x in v if str(x).strip())
+        else:
+            args.exclude_types = str(v or "")
+
+    if (not has("--strict-types")) and ("strict_types" in cfg):
+        args.strict_types = bool(cfg.get("strict_types"))
+
+    if (not has("--pdf-fallback-pages")) and ("pdf_fallback_pages" in cfg):
+        args.pdf_fallback_pages = int(cfg["pdf_fallback_pages"])
+
+    # keywords vs no-keywords: se user passou flags explícitas, não mexemos
+    if has("--no-keywords") or has("--keywords"):
+        return
+
+    if cfg.get("no_keywords") is True:
+        args.no_keywords = True
+    elif cfg.get("no_keywords") is False:
+        args.no_keywords = False
+
+    if ("keywords" in cfg) and (cfg.get("keywords") is not None):
+        args.keywords = list(cfg.get("keywords") or [])
+
+    logger.info(
+        "📌 Profile aplicado: %s (days=%s, types=%s, exclude_types=%s, strict_types=%s, no_keywords=%s, pdf_fallback_pages=%s)",
+        profile,
+        getattr(args, "days", None),
+        getattr(args, "types", "") or "—",
+        getattr(args, "exclude_types", "") or "—",
+        getattr(args, "strict_types", False),
+        getattr(args, "no_keywords", False),
+        getattr(args, "pdf_fallback_pages", None),
+    )
 
     def has(flag: str) -> bool:
         return flag in sys.argv
@@ -2067,18 +2122,6 @@ def apply_profile_to_args(args: argparse.Namespace) -> None:
         args.no_keywords = False
     if ("keywords" in cfg) and (cfg.get("keywords") is not None):
         args.keywords = list(cfg.get("keywords") or [])
-
-    # Log explícito do profile aplicado (B9)
-    logger.info(
-        "📌 Profile aplicado: %s (days=%s, types=%s, exclude_types=%s, strict_types=%s, no_keywords=%s, pdf_fallback_pages=%s)",
-        profile,
-        getattr(args, "days", None),
-        getattr(args, "types", "") or "—",
-        getattr(args, "exclude_types", "") or "—",
-        getattr(args, "strict_types", False),
-        getattr(args, "no_keywords", False),
-        getattr(args, "pdf_fallback_pages", None),
-    )
 
 
 def main() -> None:
@@ -2136,13 +2179,33 @@ def main() -> None:
         help="Quando --types está definido, também rejeita itens com tipo desconhecido.",
     )
 
+    ap.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="Lista os perfis disponíveis (lidos de profiles.json ou fallback) e termina.",
+    )
+    ap.add_argument(
+        "--profiles-path",
+        default="",
+        help="Caminho para profiles.json alternativo (override).",
+    )
+
     args = ap.parse_args()
 
     # 1) Configurar logging antes de aplicar profile (para o log "📌 Profile aplicado" aparecer)
     setup_logging(args.log_level or ("DEBUG" if args.debug else None))
 
+    profiles_path = Path(args.profiles_path) if (args.profiles_path or "").strip() else None
+
+    if args.list_profiles:
+        profiles = load_profiles(extra_path=profiles_path)
+        print("Perfis disponíveis:")
+        for name in sorted(name for name in profiles if name.strip()):
+            print(f" - {name}")
+        return
+
     # 2) Aplicar defaults do profile (flags explícitas continuam a ganhar)
-    apply_profile_to_args(args)
+    apply_profile_to_args(args, extra_path=profiles_path)
 
     keywords_enabled = not args.no_keywords
     if keywords_enabled:
@@ -2183,7 +2246,7 @@ def main() -> None:
         include_types=include_types,
         exclude_types=exclude_types,
         strict_types=getattr(args, "strict_types", False),
-        profile=(args.profile or None),
+        profile=None,
     )
 
 
