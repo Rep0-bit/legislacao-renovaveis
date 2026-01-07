@@ -1,0 +1,24 @@
+{
+  "renovaveis_portarias": {
+    "days": 14,
+    "types": [
+      "portaria"
+    ],
+    "no_keywords": false,
+    "pdf_fallback_pages": 8
+  },
+  "renovaveis_todos": {
+    "days": 14,
+    "types": [],
+    "no_keywords": false,
+    "pdf_fallback_pages": 8
+  },
+  "sem_keywords_portarias": {
+    "days": 14,
+    "types": [
+      "portaria"
+    ],
+    "no_keywords": true,
+    "pdf_fallback_pages": 8
+  }
+}

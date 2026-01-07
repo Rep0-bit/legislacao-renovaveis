@@ -1207,9 +1207,17 @@ def collect(
         if (days == 90) and ("days" in cfg):
             days = int(cfg["days"])
         if (include_types is None) and ("types" in cfg):
-            include_types = [p for p in str(cfg.get("types") or "").split(",") if p.strip()]
+            v = cfg.get("types")
+            if isinstance(v, list):
+                include_types = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                include_types = [p for p in str(v or "").split(",") if p.strip()]
         if (exclude_types is None) and ("exclude_types" in cfg):
-            exclude_types = [p for p in str(cfg.get("exclude_types") or "").split(",") if p.strip()]
+            v = cfg.get("exclude_types")
+            if isinstance(v, list):
+                exclude_types = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                exclude_types = [p for p in str(v or "").split(",") if p.strip()]
         if (not strict_types) and ("strict_types" in cfg):
             strict_types = bool(cfg.get("strict_types"))
         if (pdf_fallback_pages == 2) and ("pdf_fallback_pages" in cfg):
@@ -1957,28 +1965,59 @@ DEFAULT_KEYWORDS = [
     "carbono",
 ]
 
-PROFILES: dict[str, dict] = {
+DEFAULT_PROFILES: dict[str, dict] = {
     "renovaveis_portarias": {
         "days": 14,
-        "types": "portaria",
-        # keywords: usa DEFAULT_KEYWORDS
+        "types": ["portaria"],
         "pdf_fallback_pages": 8,
         "no_keywords": False,
     },
     "renovaveis_todos": {
         "days": 14,
-        "types": "",
-        # keywords: usa DEFAULT_KEYWORDS
+        "types": [],
         "pdf_fallback_pages": 8,
         "no_keywords": False,
     },
     "sem_keywords_portarias": {
         "days": 14,
-        "types": "portaria",
+        "types": ["portaria"],
         "pdf_fallback_pages": 8,
         "no_keywords": True,
     },
 }
+
+
+def load_profiles(*, extra_path: Path | None = None) -> dict[str, dict]:
+    """Carrega perfis de `src/config/profiles.json` (ou override via extra_path).
+
+    Se o ficheiro não existir, usa DEFAULT_PROFILES como fallback.
+    """
+    # src/collectors/ -> src/
+    base = Path(__file__).resolve().parents[1]
+    default_path = base / "config" / "profiles.json"
+    path = extra_path or default_path
+
+    if not path.exists():
+        return dict(DEFAULT_PROFILES)
+
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(obj, dict):
+            raise ValueError("profiles.json tem de ser um objeto JSON (dict) no topo")
+        # normalizar para dict[str, dict]
+        out: dict[str, dict] = {}
+        for k, v in obj.items():
+            if not isinstance(k, str) or not isinstance(v, dict):
+                continue
+            out[k.strip()] = v
+        return out or dict(DEFAULT_PROFILES)
+    except Exception as e:
+        logger.warning("⚠️ Falha a ler profiles (%s): %s", path, e)
+        return dict(DEFAULT_PROFILES)
+
+
+# Profiles efetivos (externos, com fallback)
+PROFILES: dict[str, dict] = load_profiles()
 
 
 def apply_profile_to_args(args: argparse.Namespace) -> None:
@@ -2001,9 +2040,17 @@ def apply_profile_to_args(args: argparse.Namespace) -> None:
         args.days = int(cfg["days"])
 
     if (not has("--types")) and ("types" in cfg):
-        args.types = str(cfg.get("types", ""))
+        v = cfg.get("types", "")
+        if isinstance(v, list):
+            args.types = ",".join(str(x).strip() for x in v if str(x).strip())
+        else:
+            args.types = str(v or "")
     if (not has("--exclude-types")) and ("exclude_types" in cfg):
-        args.exclude_types = str(cfg.get("exclude_types", ""))
+        v = cfg.get("exclude_types", "")
+        if isinstance(v, list):
+            args.exclude_types = ",".join(str(x).strip() for x in v if str(x).strip())
+        else:
+            args.exclude_types = str(v or "")
 
     if (not has("--strict-types")) and ("strict_types" in cfg):
         args.strict_types = bool(cfg.get("strict_types"))
@@ -2020,6 +2067,18 @@ def apply_profile_to_args(args: argparse.Namespace) -> None:
         args.no_keywords = False
     if ("keywords" in cfg) and (cfg.get("keywords") is not None):
         args.keywords = list(cfg.get("keywords") or [])
+
+    # Log explícito do profile aplicado (B9)
+    logger.info(
+        "📌 Profile aplicado: %s (days=%s, types=%s, exclude_types=%s, strict_types=%s, no_keywords=%s, pdf_fallback_pages=%s)",
+        profile,
+        getattr(args, "days", None),
+        getattr(args, "types", "") or "—",
+        getattr(args, "exclude_types", "") or "—",
+        getattr(args, "strict_types", False),
+        getattr(args, "no_keywords", False),
+        getattr(args, "pdf_fallback_pages", None),
+    )
 
 
 def main() -> None:
@@ -2079,9 +2138,11 @@ def main() -> None:
 
     args = ap.parse_args()
 
-    apply_profile_to_args(args)
-
+    # 1) Configurar logging antes de aplicar profile (para o log "📌 Profile aplicado" aparecer)
     setup_logging(args.log_level or ("DEBUG" if args.debug else None))
+
+    # 2) Aplicar defaults do profile (flags explícitas continuam a ganhar)
+    apply_profile_to_args(args)
 
     keywords_enabled = not args.no_keywords
     if keywords_enabled:
