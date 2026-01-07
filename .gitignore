@@ -38,3 +38,17 @@ tmp_*.py
 
 # Outros
 .DS_Store
+
+# Caches / tooling
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+
+# Build artifacts
+build/
+dist/
+
+# Ad-hoc helper scripts (mantidos fora do repo)
+scripts/
