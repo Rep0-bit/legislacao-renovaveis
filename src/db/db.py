@@ -75,6 +75,10 @@ def init_db(db_path: Path | None = None) -> None:
         with suppress(sqlite3.OperationalError):
             conn.execute("ALTER TABLE diplomas ADD COLUMN id_dr TEXT;")
 
+        # Se a tabela foi criada sem tipo_slug numa versão anterior
+        with suppress(sqlite3.OperationalError):
+            conn.execute("ALTER TABLE diplomas ADD COLUMN tipo_slug TEXT;")
+
         # índice único para id_dr (quando existir)
         conn.execute(
             """

@@ -136,6 +136,7 @@ def upsert_diploma(
     payload: dict[str, Any] = {
         "id_dr": incoming_id_dr or (existing.get("id_dr") if existing else None),
         "tipo": tipo_s,
+        "tipo_slug": (reg.get("tipo_slug") or None),
         "numero": numero_s,
         "ano": ano_i,
         "data_publicacao": reg.get("data_publicacao"),
@@ -156,14 +157,14 @@ def upsert_diploma(
             """
             INSERT INTO diplomas (
                 id_dr,
-                tipo, numero, ano,
+                tipo, tipo_slug, numero, ano,
                 data_publicacao, titulo, sumario,
                 url_detalhe, url_pdf, url_consolidado,
                 resumo_1_frase, observacoes,
                 estado, ultima_verificacao, hash_fonte
             ) VALUES (
                 :id_dr,
-                :tipo, :numero, :ano,
+                :tipo, :tipo_slug, :numero, :ano,
                 :data_publicacao, :titulo, :sumario,
                 :url_detalhe, :url_pdf, :url_consolidado,
                 :resumo_1_frase, :observacoes,
@@ -171,6 +172,8 @@ def upsert_diploma(
             )
             ON CONFLICT(tipo, numero, ano) DO UPDATE SET
                 id_dr=COALESCE(NULLIF(excluded.id_dr,''), diplomas.id_dr),
+
+                tipo_slug=COALESCE(NULLIF(excluded.tipo_slug,''), diplomas.tipo_slug),
 
                 data_publicacao=excluded.data_publicacao,
                 titulo=excluded.titulo,
