@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual env
+.venv/
+venv/
+
+# Dados gerados pela aplicação
+data/index/
+data/meta/
+data/text/
+data/debug/
+data/index/reports/
+
+# Bases de dados
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporários
+tmp_*.py
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# Outros
+.DS_Store
