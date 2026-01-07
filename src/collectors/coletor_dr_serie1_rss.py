@@ -992,6 +992,71 @@ def _is_detail_link(url: str) -> bool:
     return ("/dr/detalhe/" in u) or ("/eli/" in u)
 
 
+# -----------------------------
+# B6: filtro por tipo (slug do DR)
+# -----------------------------
+_TIPO_ALIASES: dict[str, str] = {
+    "dl": "decreto-lei",
+    "decretolei": "decreto-lei",
+    "decreto_lei": "decreto-lei",
+    "decreto lei": "decreto-lei",
+}
+
+
+def _norm_tipo_slug(t: str) -> str:
+    t = (t or "").strip().lower()
+    t = t.replace("_", "-")
+    return _TIPO_ALIASES.get(t, t)
+
+
+def extract_tipo_from_detail_url(url: str) -> str | None:
+    """Extrai o slug do tipo a partir de /dr/detalhe/<tipo>/..."""
+    if not url:
+        return None
+    m = re.search(r"/dr/detalhe/([^/]+)/", url)
+    if not m:
+        return None
+    return _norm_tipo_slug(m.group(1))
+
+
+def infer_tipo_from_title(title: str) -> str | None:
+    """Fallback leve baseado no prefixo do título."""
+    t = (title or "").strip().lower()
+    if not t:
+        return None
+    if t.startswith("portaria"):
+        return "portaria"
+    if t.startswith("decreto-lei") or t.startswith("decreto lei"):
+        return "decreto-lei"
+    if t.startswith("lei"):
+        return "lei"
+    if t.startswith("despacho"):
+        return "despacho"
+    if t.startswith("resolução") or t.startswith("resolucao"):
+        return "resolucao"
+    return None
+
+
+def should_filter_by_tipo(
+    tipo: str | None,
+    include_set: set[str],
+    exclude_set: set[str],
+    strict_types: bool,
+) -> tuple[bool, str]:
+    """Retorna (filtrar?, motivo)."""
+    tipo_norm = _norm_tipo_slug(tipo or "") if tipo else ""
+    if exclude_set and tipo_norm and (tipo_norm in exclude_set):
+        return True, f"excluded type: {tipo_norm}"
+
+    if include_set:
+        if not tipo_norm:
+            return (True, "unknown type (strict)") if strict_types else (False, "unknown type (allowed)")
+        if tipo_norm not in include_set:
+            return True, f"type not in include set: {tipo_norm}"
+
+    return False, "ok"
+
+
 def _filter_items(
     items: list[dict],
     cutoff: datetime,
@@ -1044,8 +1109,16 @@ def collect(
     dump_html_shell: bool = False,
     pdf_fallback_pages: int = 2,
     keywords_enabled: bool = True,
+    include_types: list[str] | None = None,
+    exclude_types: list[str] | None = None,
+    strict_types: bool = False,
 ) -> None:
     init_db()
+
+    include_types = include_types or []
+    exclude_types = exclude_types or []
+    include_set = {_norm_tipo_slug(t) for t in include_types if _norm_tipo_slug(t)}
+    exclude_set = {_norm_tipo_slug(t) for t in exclude_types if _norm_tipo_slug(t)}
 
     if reset_checkpoint_flag:
         reset_checkpoint()
@@ -1135,6 +1208,41 @@ def collect(
         # ------------------------------------------------------------
         if rss_pdf_url:
             pdf_url = rss_pdf_url
+
+            # B6: filtro por tipo (o mais cedo possível)
+            tipo_slug = extract_tipo_from_detail_url(link) or infer_tipo_from_title(title)
+            filtrar_tipo, motivo_tipo = should_filter_by_tipo(
+                tipo_slug, include_set, exclude_set, strict_types
+            )
+            if filtrar_tipo:
+                if debug:
+                    logger.debug(
+                        "🚫 Filtrado por tipo (RSS+PDF): %s | motivo=%s | url=%s",
+                        tipo_slug or "?",
+                        motivo_tipo,
+                        (link or pdf_url),
+                    )
+                report_rows.append(
+                    {
+                        "status": "rejeitado",
+                        "manual": "nao",
+                        "tipo": tipo_slug or "",
+                        "numero": "",
+                        "ano": "",
+                        "titulo": title or "",
+                        "url_detalhe": link or "",
+                        "url_pdf": pdf_url or "",
+                        "id_dr": "",
+                        "old_hash": "",
+                        "new_hash": "",
+                        "match_keyword": "",
+                        "match_where": "",
+                        "text_source": "rss",
+                        "text_len": len((f"{title} {desc}" or "").strip()),
+                        "reason": f"type filter: {motivo_tipo}",
+                    }
+                )
+                continue
 
             filtro_texto = f"{title} {desc}"
             hit, is_generic, has_ctx = match_keywords_hit_quality(filtro_texto, keywords)
@@ -1376,6 +1484,41 @@ def collect(
         for detail_url in detail_urls:
             if debug:
                 logger.debug("🔗 detalhe_url: %s", detail_url)
+
+            # B6: filtro por tipo (antes de abrir o detalhe)
+            tipo_slug = extract_tipo_from_detail_url(detail_url) or infer_tipo_from_title(title)
+            filtrar_tipo, motivo_tipo = should_filter_by_tipo(
+                tipo_slug, include_set, exclude_set, strict_types
+            )
+            if filtrar_tipo:
+                if debug:
+                    logger.debug(
+                        "🚫 Filtrado por tipo: %s | motivo=%s | url=%s",
+                        tipo_slug or "?",
+                        motivo_tipo,
+                        detail_url,
+                    )
+                report_rows.append(
+                    {
+                        "status": "rejeitado",
+                        "manual": "nao",
+                        "tipo": tipo_slug or "",
+                        "numero": "",
+                        "ano": "",
+                        "titulo": title or "",
+                        "url_detalhe": detail_url or "",
+                        "url_pdf": "",
+                        "id_dr": "",
+                        "old_hash": "",
+                        "new_hash": "",
+                        "match_keyword": "",
+                        "match_where": "",
+                        "text_source": "rss",
+                        "text_len": len((f"{title} {desc}" or "").strip()),
+                        "reason": f"type filter: {motivo_tipo}",
+                    }
+                )
+                continue
 
             try:
                 detail_html = http_get(detail_url)
@@ -1714,6 +1857,22 @@ def main() -> None:
         ],
         help="Lista de palavras-chave",
     )
+    ap.add_argument(
+        "--types",
+        default="",
+        help="Filtra por tipo(s) de diploma (slug do DR). Ex: --types portaria,decreto-lei. Vazio = aceita todos.",
+    )
+    ap.add_argument(
+        "--exclude-types",
+        default="",
+        help="Exclui tipo(s) de diploma (slug do DR). Ex: --exclude-types despacho,declaração. Vazio = não exclui.",
+    )
+    ap.add_argument(
+        "--strict-types",
+        action="store_true",
+        help="Quando --types está definido, também rejeita itens com tipo desconhecido.",
+    )
+
     args = ap.parse_args()
 
     setup_logging(args.log_level or ("DEBUG" if args.debug else None))
@@ -1723,6 +1882,20 @@ def main() -> None:
         logger.info("🔎 Filtro por keywords ATIVO")
     else:
         logger.info("🚫 Filtro por keywords DESATIVADO (--no-keywords ativo)")
+
+    def _parse_types_csv(s: str) -> list[str]:
+        parts = [p.strip().lower() for p in (s or "").split(",")]
+        return [p for p in parts if p]
+
+    include_types = _parse_types_csv(getattr(args, "types", ""))
+    exclude_types = _parse_types_csv(getattr(args, "exclude_types", ""))
+
+    if include_types:
+        logger.info("🏷️  Filtro por tipo ATIVO (include): %s", ", ".join(include_types))
+    if exclude_types:
+        logger.info("🏷️  Filtro por tipo ATIVO (exclude): %s", ", ".join(exclude_types))
+    if getattr(args, "strict_types", False) and include_types:
+        logger.info("🏷️  strict-types=ON (tipo desconhecido será rejeitado)")
 
     # reduzir ruído de libs externas
     logging.getLogger("charset_normalizer").setLevel(logging.WARNING)
@@ -1740,6 +1913,9 @@ def main() -> None:
         dump_html_shell=args.dump_html_shell,
         pdf_fallback_pages=args.pdf_fallback_pages,
         keywords_enabled=keywords_enabled,
+        include_types=include_types,
+        exclude_types=exclude_types,
+        strict_types=getattr(args, "strict_types", False),
     )
 
 
