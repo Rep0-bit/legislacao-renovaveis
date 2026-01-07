@@ -491,17 +491,68 @@ def _make_soup(html: bytes) -> BeautifulSoup:
         return BeautifulSoup(html, "html.parser")
 
 
+def extract_detail_eli_links_from_text(
+    text: str, base_url: str = "https://diariodarepublica.pt"
+) -> list[str]:
+    """Extrai links /dr/detalhe/ e /eli/ de texto (inclui casos com URLs escapadas tipo \\/)."""
+    if not text:
+        return []
+    # Normaliza JSON com \/
+    t = text.replace("\\/", "/")
+    links: set[str] = set()
+
+    # URLs absolutas
+    for m in re.finditer(r"https?://[^\s'\"<>]+", t, flags=re.IGNORECASE):
+        u = m.group(0)
+        if ("/dr/detalhe/" in u) or ("/eli/" in u):
+            links.add(u)
+
+    # URLs relativas
+    for m in re.finditer(r"(/dr/detalhe/[^\s'\"<>]+)", t, flags=re.IGNORECASE):
+        links.add(urljoin(base_url, m.group(1)))
+    for m in re.finditer(r"(/eli/[^\s'\"<>]+)", t, flags=re.IGNORECASE):
+        links.add(urljoin(base_url, m.group(1)))
+
+    # Limpeza de pontuação comum no fim
+    cleaned: set[str] = set()
+    for u in links:
+        cleaned.add(u.rstrip(").,;\"'"))
+    return sorted(cleaned)
+
+
 def extract_detail_links_from_index_html(index_html: bytes, base_url: str) -> list[str]:
+    """Extrai links de detalhe/ELI de uma página "index" do DR.
+
+    Estratégia:
+    1) <a href=...>
+    2) atributos comuns (data-href/data-url/data-link)
+    3) regex em texto cru (inclui scripts/JSON)
+    """
     soup = _make_soup(index_html)
     links: set[str] = set()
 
-    for a in soup.find_all("a", href=True):
+    # 1) anchors normais
+    for a in soup.find_all("a"):
         href = (a.get("href") or "").strip()
-        if not href:
-            continue
-        full = urljoin(base_url, href)
-        if ("/dr/detalhe/" in full) or ("/eli/" in full):
-            links.add(full)
+        if href:
+            full = urljoin(base_url, href)
+            if ("/dr/detalhe/" in full) or ("/eli/" in full):
+                links.add(full)
+
+    # 2) atributos alternativos (OutSystems/SPA às vezes usa data-*)
+    for a in soup.find_all(True):
+        for attr in ("data-href", "data-url", "data-link"):
+            v = (a.get(attr) or "").strip()
+            if not v:
+                continue
+            full = urljoin(base_url, v)
+            if ("/dr/detalhe/" in full) or ("/eli/" in full):
+                links.add(full)
+
+    # 3) regex em texto cru (inclui JSON com \/)
+    raw = (index_html or b"").decode("utf-8", errors="ignore")
+    for u in extract_detail_eli_links_from_text(raw, base_url=base_url):
+        links.add(u)
 
     return sorted(links)
 
@@ -992,71 +1043,6 @@ def _is_detail_link(url: str) -> bool:
     return ("/dr/detalhe/" in u) or ("/eli/" in u)
 
 
-# -----------------------------
-# B6: filtro por tipo (slug do DR)
-# -----------------------------
-_TIPO_ALIASES: dict[str, str] = {
-    "dl": "decreto-lei",
-    "decretolei": "decreto-lei",
-    "decreto_lei": "decreto-lei",
-    "decreto lei": "decreto-lei",
-}
-
-
-def _norm_tipo_slug(t: str) -> str:
-    t = (t or "").strip().lower()
-    t = t.replace("_", "-")
-    return _TIPO_ALIASES.get(t, t)
-
-
-def extract_tipo_from_detail_url(url: str) -> str | None:
-    """Extrai o slug do tipo a partir de /dr/detalhe/<tipo>/..."""
-    if not url:
-        return None
-    m = re.search(r"/dr/detalhe/([^/]+)/", url)
-    if not m:
-        return None
-    return _norm_tipo_slug(m.group(1))
-
-
-def infer_tipo_from_title(title: str) -> str | None:
-    """Fallback leve baseado no prefixo do título."""
-    t = (title or "").strip().lower()
-    if not t:
-        return None
-    if t.startswith("portaria"):
-        return "portaria"
-    if t.startswith("decreto-lei") or t.startswith("decreto lei"):
-        return "decreto-lei"
-    if t.startswith("lei"):
-        return "lei"
-    if t.startswith("despacho"):
-        return "despacho"
-    if t.startswith("resolução") or t.startswith("resolucao"):
-        return "resolucao"
-    return None
-
-
-def should_filter_by_tipo(
-    tipo: str | None,
-    include_set: set[str],
-    exclude_set: set[str],
-    strict_types: bool,
-) -> tuple[bool, str]:
-    """Retorna (filtrar?, motivo)."""
-    tipo_norm = _norm_tipo_slug(tipo or "") if tipo else ""
-    if exclude_set and tipo_norm and (tipo_norm in exclude_set):
-        return True, f"excluded type: {tipo_norm}"
-
-    if include_set:
-        if not tipo_norm:
-            return (True, "unknown type (strict)") if strict_types else (False, "unknown type (allowed)")
-        if tipo_norm not in include_set:
-            return True, f"type not in include set: {tipo_norm}"
-
-    return False, "ok"
-
-
 def _filter_items(
     items: list[dict],
     cutoff: datetime,
@@ -1109,16 +1095,8 @@ def collect(
     dump_html_shell: bool = False,
     pdf_fallback_pages: int = 2,
     keywords_enabled: bool = True,
-    include_types: list[str] | None = None,
-    exclude_types: list[str] | None = None,
-    strict_types: bool = False,
 ) -> None:
     init_db()
-
-    include_types = include_types or []
-    exclude_types = exclude_types or []
-    include_set = {_norm_tipo_slug(t) for t in include_types if _norm_tipo_slug(t)}
-    exclude_set = {_norm_tipo_slug(t) for t in exclude_types if _norm_tipo_slug(t)}
 
     if reset_checkpoint_flag:
         reset_checkpoint()
@@ -1185,6 +1163,7 @@ def collect(
 
     report_rows: list[dict] = []
     total_links = 0
+    total_pdf_direct = 0
     fail_fetch = 0
     rejected_kw = 0
     rejected_parse = 0
@@ -1208,41 +1187,7 @@ def collect(
         # ------------------------------------------------------------
         if rss_pdf_url:
             pdf_url = rss_pdf_url
-
-            # B6: filtro por tipo (o mais cedo possível)
-            tipo_slug = extract_tipo_from_detail_url(link) or infer_tipo_from_title(title)
-            filtrar_tipo, motivo_tipo = should_filter_by_tipo(
-                tipo_slug, include_set, exclude_set, strict_types
-            )
-            if filtrar_tipo:
-                if debug:
-                    logger.debug(
-                        "🚫 Filtrado por tipo (RSS+PDF): %s | motivo=%s | url=%s",
-                        tipo_slug or "?",
-                        motivo_tipo,
-                        (link or pdf_url),
-                    )
-                report_rows.append(
-                    {
-                        "status": "rejeitado",
-                        "manual": "nao",
-                        "tipo": tipo_slug or "",
-                        "numero": "",
-                        "ano": "",
-                        "titulo": title or "",
-                        "url_detalhe": link or "",
-                        "url_pdf": pdf_url or "",
-                        "id_dr": "",
-                        "old_hash": "",
-                        "new_hash": "",
-                        "match_keyword": "",
-                        "match_where": "",
-                        "text_source": "rss",
-                        "text_len": len((f"{title} {desc}" or "").strip()),
-                        "reason": f"type filter: {motivo_tipo}",
-                    }
-                )
-                continue
+            total_pdf_direct += 1
 
             filtro_texto = f"{title} {desc}"
             hit, is_generic, has_ctx = match_keywords_hit_quality(filtro_texto, keywords)
@@ -1427,6 +1372,13 @@ def collect(
         # ------------------------------------------------------------
         detail_urls: list[str] = [link] if _is_detail_link(link) else []
         if not detail_urls:
+            # B7: tenta extrair links diretamente do RSS (description/guid/link)
+            rss_blob = f"{title} {desc} {link or ''} {(it.get('guid') or '')}"
+            detail_urls = extract_detail_eli_links_from_text(
+                rss_blob, base_url=link or "https://diariodarepublica.pt"
+            )
+
+        if not detail_urls:
             try:
                 index_html = http_get(link)
                 detail_urls = extract_detail_links_from_index_html(index_html, base_url=link)
@@ -1484,41 +1436,6 @@ def collect(
         for detail_url in detail_urls:
             if debug:
                 logger.debug("🔗 detalhe_url: %s", detail_url)
-
-            # B6: filtro por tipo (antes de abrir o detalhe)
-            tipo_slug = extract_tipo_from_detail_url(detail_url) or infer_tipo_from_title(title)
-            filtrar_tipo, motivo_tipo = should_filter_by_tipo(
-                tipo_slug, include_set, exclude_set, strict_types
-            )
-            if filtrar_tipo:
-                if debug:
-                    logger.debug(
-                        "🚫 Filtrado por tipo: %s | motivo=%s | url=%s",
-                        tipo_slug or "?",
-                        motivo_tipo,
-                        detail_url,
-                    )
-                report_rows.append(
-                    {
-                        "status": "rejeitado",
-                        "manual": "nao",
-                        "tipo": tipo_slug or "",
-                        "numero": "",
-                        "ano": "",
-                        "titulo": title or "",
-                        "url_detalhe": detail_url or "",
-                        "url_pdf": "",
-                        "id_dr": "",
-                        "old_hash": "",
-                        "new_hash": "",
-                        "match_keyword": "",
-                        "match_where": "",
-                        "text_source": "rss",
-                        "text_len": len((f"{title} {desc}" or "").strip()),
-                        "reason": f"type filter: {motivo_tipo}",
-                    }
-                )
-                continue
 
             try:
                 detail_html = http_get(detail_url)
@@ -1780,7 +1697,8 @@ def collect(
         counts[r["status"]] = counts.get(r["status"], 0) + 1
         manual_count += 1 if r["manual"] == "sim" else 0
 
-    logger.info("🔗 Links de atos encontrados (bruto): %d", total_links)
+    logger.info("🔗 Links de detalhe/ELI encontrados (bruto): %d", total_links)
+    logger.info("📄 Itens com PDF direto usados: %d", total_pdf_direct)
     if fail_fetch:
         logger.warning("⚠️ Falhas de fetch: %d", fail_fetch)
     if debug:
@@ -1883,20 +1801,6 @@ def main() -> None:
     else:
         logger.info("🚫 Filtro por keywords DESATIVADO (--no-keywords ativo)")
 
-    def _parse_types_csv(s: str) -> list[str]:
-        parts = [p.strip().lower() for p in (s or "").split(",")]
-        return [p for p in parts if p]
-
-    include_types = _parse_types_csv(getattr(args, "types", ""))
-    exclude_types = _parse_types_csv(getattr(args, "exclude_types", ""))
-
-    if include_types:
-        logger.info("🏷️  Filtro por tipo ATIVO (include): %s", ", ".join(include_types))
-    if exclude_types:
-        logger.info("🏷️  Filtro por tipo ATIVO (exclude): %s", ", ".join(exclude_types))
-    if getattr(args, "strict_types", False) and include_types:
-        logger.info("🏷️  strict-types=ON (tipo desconhecido será rejeitado)")
-
     # reduzir ruído de libs externas
     logging.getLogger("charset_normalizer").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -1913,9 +1817,6 @@ def main() -> None:
         dump_html_shell=args.dump_html_shell,
         pdf_fallback_pages=args.pdf_fallback_pages,
         keywords_enabled=keywords_enabled,
-        include_types=include_types,
-        exclude_types=exclude_types,
-        strict_types=getattr(args, "strict_types", False),
     )
 
 
