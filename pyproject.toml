@@ -1,7 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "legislacao-renovaveis"
 version = "0.1.0"
 requires-python = ">=3.10"
+
+[project.scripts]
+leis = "src.leis.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src", "src.*"]
 
 [tool.ruff]
 line-length = 110

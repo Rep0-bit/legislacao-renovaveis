@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import traceback
 from collections.abc import Sequence
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .core.models import ConvertResult
 from .db.db import get_conn, init_db
 from .processing.conversao import converter
 from .utils.csv_utils import open_csv_reader
@@ -20,9 +22,6 @@ def _agora_utc_iso() -> str:
 
 
 def _migrar_schema_conversao(db_path: Path | None = None) -> None:
-    """
-    Migração leve (idempotente) para guardar o resultado da conversão.
-    """
     with get_conn(db_path) as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(diplomas)").fetchall()}
 
@@ -83,9 +82,6 @@ def find_latest_report(reports_dir: Path = REPORTS_DIR) -> Path | None:
 
 
 def read_report_targets(report_path: Path, delimiter: str = ";") -> list[tuple[str, str, int]]:
-    """
-    Lê relatório do coletor e devolve lista de chaves (tipo, numero, ano) onde status in (novo, atualizado).
-    """
     targets: list[tuple[str, str, int]] = []
 
     f, reader, enc = open_csv_reader(report_path, delimiter=delimiter)
@@ -144,76 +140,36 @@ def listar_para_converter_modo_bd(
         return conn.execute(q).fetchall()
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(
-        description="Converte PDFs associados aos diplomas e guarda texto/meta em disco."
-    )
-
-    mode = ap.add_mutually_exclusive_group(required=False)
-    mode.add_argument(
-        "--from-latest-report",
-        action="store_true",
-        help="Converter apenas novos/atualizados do relatório mais recente",
-    )
-    mode.add_argument(
-        "--from-report",
-        default=None,
-        help="Converter apenas novos/atualizados de um relatório específico (caminho)",
-    )
-    mode.add_argument("--from-db", action="store_true", help="Converter da BD (default)")
-
-    ap.add_argument("--db", default=None, help="Caminho da BD SQLite (opcional)")
-    ap.add_argument(
-        "--out-dir",
-        default="data",
-        help="Diretório base de saída (raw_html/pdfs/text/meta). Default: data",
-    )
-
-    ap.add_argument(
-        "--only-missing",
-        action="store_true",
-        help="Só converter o que ainda não foi convertido (default recomendado)",
-    )
-    ap.add_argument("--reprocess", action="store_true", help="Reprocessar mesmo que já tenha conv_ok=1")
-    ap.add_argument("--limit", type=int, default=None, help="Limitar nº de conversões nesta execução")
-    ap.add_argument("--report-delimiter", default=";", help="Separador do relatório do coletor (default ';')")
-
-    args = ap.parse_args(argv)
-
-    db_path = Path(args.db) if args.db else None
-    out_dir = Path(args.out_dir)
-
+def run_convert(
+    *,
+    db_path: Path | None = None,
+    out_dir: Path = Path("data"),
+    only_missing: bool = True,
+    limit: int | None = None,
+    from_latest_report: bool = False,
+    from_report: Path | None = None,
+    report_delimiter: str = ";",
+) -> ConvertResult:
+    """
+    Função reutilizável (API/CLI) para converter diplomas.
+    Não imprime; devolve métricas estruturadas.
+    """
     init_db(db_path=db_path)
     _migrar_schema_conversao(db_path=db_path)
 
-    only_missing = True
-    if args.reprocess:
-        only_missing = False
-    if args.only_missing:
-        only_missing = True
-
     rows_to_process: list[tuple[Any, ...]] = []
 
-    # ----- Modo relatório -----
-    want_report_mode = args.from_latest_report or bool(args.from_report)
-
+    want_report_mode = from_latest_report or (from_report is not None)
     if want_report_mode:
-        report_path = Path(args.from_report) if args.from_report else find_latest_report()
-
-        # fallback: se não existir relatório, cai para BD
+        report_path = from_report if from_report else find_latest_report()
         if not report_path or not report_path.exists():
-            print("⚠️ Não encontrei relatório (data/index/reports/relatorio_coleta_*.csv).")
-            print("➡️ Vou usar fallback: modo BD (url_pdf preenchido).")
             rows_to_process = listar_para_converter_modo_bd(
                 only_missing=only_missing,
-                limit=args.limit,
+                limit=limit,
                 db_path=db_path,
             )
         else:
-            targets = read_report_targets(report_path, delimiter=args.report_delimiter)
-            print(f"🧾 Relatório: {report_path}")
-            print(f"🎯 Alvos no relatório (novo/atualizado): {len(targets)}")
-
+            targets = read_report_targets(report_path, delimiter=report_delimiter)
             for tipo, numero, ano in targets:
                 row = fetch_from_db(tipo, numero, ano, db_path=db_path)
                 if not row:
@@ -227,32 +183,31 @@ def main(argv: Sequence[str] | None = None) -> None:
 
                 rows_to_process.append((t, n, a, url_detalhe, url_pdf, conv_ok))
 
-            if args.limit is not None:
-                rows_to_process = rows_to_process[: int(args.limit)]
-
+            if limit is not None:
+                rows_to_process = rows_to_process[: int(limit)]
     else:
-        # default: BD
         rows_to_process = listar_para_converter_modo_bd(
             only_missing=only_missing,
-            limit=args.limit,
+            limit=limit,
             db_path=db_path,
         )
-
-    print(f"📥 Para converter: {len(rows_to_process)} (only_missing={only_missing})")
 
     ok_count = 0
     err_count = 0
     skipped_no_pdf = 0
 
     for tipo, numero, ano, url_detalhe, url_pdf, _conv_ok in rows_to_process:
-        label = f"{tipo} {numero}/{ano}"
-
         if not url_pdf:
             skipped_no_pdf += 1
             continue
 
         try:
+            if not url_detalhe:
+                raise ValueError("url_detalhe vazio/NULL na BD")
+
             meta = converter(url_detalhe=url_detalhe, url_pdf_direto=url_pdf, out_dir=out_dir)
+            err = meta.get("pdf_extract_error") or meta.get("conv_error")
+
             marcar_resultado(
                 tipo,
                 numero,
@@ -260,11 +215,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 ok=True,
                 doc_id=meta.get("doc_id"),
                 meta_path=meta.get("ficheiro_meta"),
-                err=None,
+                err=err,
                 db_path=db_path,
             )
             ok_count += 1
-            print(f"✅ {label} -> {meta.get('doc_id')}")
         except Exception as e:
             marcar_resultado(
                 tipo,
@@ -277,12 +231,67 @@ def main(argv: Sequence[str] | None = None) -> None:
                 db_path=db_path,
             )
             err_count += 1
-            print(f"❌ {label} -> {e}")
+            continue
 
-    if skipped_no_pdf:
-        print(f"⚠️ Ignorados por falta de url_pdf: {skipped_no_pdf}")
+    return ConvertResult(
+        processed=len(rows_to_process),
+        ok=ok_count,
+        error=err_count,
+        skipped_no_pdf=skipped_no_pdf,
+    )
 
-    print(f"\n🏁 Concluído: ok={ok_count} | erro={err_count}")
+
+def main(argv: Sequence[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(
+        description="Converte PDFs associados aos diplomas e guarda texto/meta em disco."
+    )
+
+    mode = ap.add_mutually_exclusive_group(required=False)
+    mode.add_argument("--from-latest-report", action="store_true")
+    mode.add_argument("--from-report", default=None)
+    mode.add_argument("--from-db", action="store_true")
+
+    ap.add_argument("--db", default=None)
+    ap.add_argument("--out-dir", default="data")
+    ap.add_argument("--only-missing", action="store_true")
+    ap.add_argument("--reprocess", action="store_true")
+    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--report-delimiter", default=";")
+
+    args = ap.parse_args(argv)
+
+    db_path = Path(args.db) if args.db else None
+    out_dir = Path(args.out_dir)
+
+    only_missing = True
+    if args.reprocess:
+        only_missing = False
+    if args.only_missing:
+        only_missing = True
+
+    try:
+        res = run_convert(
+            db_path=db_path,
+            out_dir=out_dir,
+            only_missing=only_missing,
+            limit=args.limit,
+            from_latest_report=args.from_latest_report,
+            from_report=Path(args.from_report) if args.from_report else None,
+            report_delimiter=args.report_delimiter,
+        )
+
+        print(f"📥 Para converter: {res.processed} (only_missing={only_missing})")
+        if res.skipped_no_pdf:
+            print(f"⚠️ Ignorados por falta de url_pdf: {res.skipped_no_pdf}")
+        print(f"\n🏁 Concluído: ok={res.ok} | erro={res.error}")
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"❌ Erro no runner: {e}")
+        print("----- TRACEBACK (top) -----")
+        print(tb)
+        print("----- /TRACEBACK -----")
+        raise
 
 
 if __name__ == "__main__":
