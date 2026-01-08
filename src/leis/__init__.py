@@ -1,4 +1,4 @@
-# src/leis/__init__.py
-from __future__ import annotations
+"""Leis package.
 
-__all__ = []
+Intentionally lightweight: do not import heavy modules at import-time.
+"""

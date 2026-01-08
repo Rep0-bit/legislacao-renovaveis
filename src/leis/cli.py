@@ -1,197 +1,126 @@
-# src/leis/cli.py
 from __future__ import annotations
 
 import argparse
-import logging
-import subprocess
-import sys
-from collections.abc import Sequence
 
-logger = logging.getLogger(__name__)
-
-# Módulos reais no teu projeto (confirmados pela árvore)
-MODULE_COLLECT = "src.collectors.coletor_dr_serie1_rss"
-MODULE_CONVERT = "src.processing.conversao"
+from . import api
 
 
-def _configure_logging(debug: bool) -> None:
-    """
-    Configura logging via setup_logging() do projeto.
-    O teu setup_logging espera level como string (ex: "DEBUG"/"INFO").
-    """
-    level_str = "DEBUG" if debug else "INFO"
-
-    try:
-        from src.config.logging_setup import setup_logging  # type: ignore
-    except Exception:
-        logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
-        return
-
-    # 1) Se suportar debug=...
-    try:
-        setup_logging(debug=debug)  # type: ignore[arg-type]
-        return
-    except TypeError:
-        pass
-
-    # 2) Caso padrão do teu projeto: level como STRING
-    try:
-        setup_logging(level=level_str)  # type: ignore[arg-type]
-        return
-    except TypeError:
-        pass
-
-    # 3) Sem args
-    try:
-        setup_logging()  # type: ignore[misc]
-        return
-    except Exception:
-        logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
+def _parse_csv_list(s: str) -> list[str]:
+    return [p.strip() for p in (s or "").split(",") if p.strip()]
 
 
-def _run_module(module: str, argv: Sequence[str], *, debug: bool = False) -> int:
-    """
-    Executa `python -m <module> ...` no mesmo venv.
-    Se debug=True, propaga LOG_LEVEL=DEBUG para o processo filho.
-    """
-    cmd = [sys.executable, "-m", module, *argv]
-    logger.debug("A executar: %s", " ".join(cmd))
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="python -m src.leis")
+    sub = ap.add_subparsers(dest="cmd", required=True)
 
-    import os
-
-    env = os.environ.copy()
-    if debug:
-        env["LOG_LEVEL"] = "DEBUG"
-
-    return subprocess.call(cmd, env=env)
-
-
-def cmd_init_db(_args: argparse.Namespace) -> int:
-    from src.db.db import init_db  # type: ignore
-
-    init_db()
-    print("✅ BD inicializada.")
-    return 0
-
-
-def cmd_collect(args: argparse.Namespace) -> int:
-    argv: list[str] = ["--days", str(args.days)]
-
-    if args.reset_checkpoint:
-        argv.append("--reset-checkpoint")
-
-    if args.force_full_window:
-        argv.append("--force-full-window")
-
-    # Propagar debug do CLI para o coletor
-    if args.debug:
-        argv += ["--debug", "--log-level", "DEBUG"]
-
-    return _run_module(MODULE_COLLECT, argv, debug=args.debug)
-
-
-def cmd_convert(args: argparse.Namespace) -> int:
-    argv: list[str] = []
-    if args.limit is not None:
-        argv += ["--limit", str(args.limit)]
-
-    if args.debug:
-        argv += ["--log-level", "DEBUG"]  # usa só se o conversor suportar
-
-    return _run_module(MODULE_CONVERT, argv, debug=args.debug)
-
-
-def cmd_run(args: argparse.Namespace) -> int:
-    rc = cmd_init_db(args)
-    if rc != 0:
-        return rc
-
-    rc = cmd_collect(args)
-    if rc != 0:
-        return rc
-
-    return cmd_convert(args)
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="leis",
-        description="Ferramentas para recolha/conversão de legislação (DR).",
+    p_list = sub.add_parser("list", help="Lista diplomas (com filtros).")
+    p_list.add_argument("--tipo", default="", help="tipo_slug exato (ex.: portaria)")
+    p_list.add_argument(
+        "--tipo-in", default="", help="CSV de tipo_slug a incluir (ex.: portaria,decreto-lei)"
+    )
+    p_list.add_argument("--tipo-not-in", default="", help="CSV de tipo_slug a excluir")
+    p_list.add_argument("--ano", type=int, default=0, help="Ano (ex.: 2026)")
+    p_list.add_argument("--from", dest="date_from", default="", help="Data publicação >= YYYY-MM-DD")
+    p_list.add_argument("--to", dest="date_to", default="", help="Data publicação <= YYYY-MM-DD")
+    p_list.add_argument("--q", default="", help="Pesquisa em titulo/sumario (LIKE)")
+    p_list.add_argument("--limit", type=int, default=20, help="Máximo de linhas (1..500)")
+    p_list.add_argument("--offset", type=int, default=0, help="Offset")
+    p_list.add_argument(
+        "--order-by",
+        default="data_publicacao_desc",
+        choices=[
+            "data_publicacao_desc",
+            "data_publicacao_asc",
+            "ano_desc",
+            "ano_asc",
+            "id_desc",
+            "id_asc",
+        ],
+        help="Ordenação",
     )
 
-    # ✅ Opção A: DEBUG GLOBAL (vale para todos os subcomandos)
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Ativa logging em modo DEBUG (global).",
-    )
+    p_stats = sub.add_parser("stats-tipo", help="Contagens por tipo_slug.")
+    p_stats.add_argument("--from", dest="date_from", default="", help="Data publicação >= YYYY-MM-DD")
+    p_stats.add_argument("--to", dest="date_to", default="", help="Data publicação <= YYYY-MM-DD")
+    p_stats.add_argument("--q", default="", help="Pesquisa em titulo/sumario (LIKE)")
+    p_stats.add_argument("--top", type=int, default=50, help="Top N (1..500)")
 
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p_init = sub.add_parser("init-db", help="Inicializa a base de dados (idempotente).")
-    p_init.set_defaults(func=cmd_init_db)
-
-    p_collect = sub.add_parser(
-        "collect",
-        help="Recolhe diplomas do DR (RSS Série I) e grava na BD.",
+    p_export = sub.add_parser("export", help="Exporta diplomas para CSV.")
+    p_export.add_argument("--out", required=True, help="Caminho do CSV de saída")
+    p_export.add_argument("--tipo", default="", help="tipo_slug exato (ex.: portaria)")
+    p_export.add_argument("--tipo-in", default="", help="CSV de tipo_slug a incluir")
+    p_export.add_argument("--tipo-not-in", default="", help="CSV de tipo_slug a excluir")
+    p_export.add_argument("--ano", type=int, default=0, help="Ano (ex.: 2026)")
+    p_export.add_argument("--from", dest="date_from", default="", help="Data publicação >= YYYY-MM-DD")
+    p_export.add_argument("--to", dest="date_to", default="", help="Data publicação <= YYYY-MM-DD")
+    p_export.add_argument("--q", default="", help="Pesquisa em titulo/sumario (LIKE)")
+    p_export.add_argument("--limit", type=int, default=500, help="Máximo de linhas (1..500)")
+    p_export.add_argument("--offset", type=int, default=0, help="Offset")
+    p_export.add_argument(
+        "--order-by",
+        default="data_publicacao_desc",
+        choices=[
+            "data_publicacao_desc",
+            "data_publicacao_asc",
+            "ano_desc",
+            "ano_asc",
+            "id_desc",
+            "id_asc",
+        ],
+        help="Ordenação",
     )
-    p_collect.add_argument("--days", type=int, default=3, help="Janela temporal em dias.")
-    p_collect.add_argument(
-        "--reset-checkpoint",
-        action="store_true",
-        help="Remove o checkpoint e força reprocessamento.",
-    )
-    p_collect.add_argument(
-        "--force-full-window",
-        action="store_true",
-        help="Ignora checkpoint e processa a janela inteira.",
-    )
-    p_collect.set_defaults(func=cmd_collect)
+    p_export.add_argument("--delimiter", default=";", help="Separador CSV (default ; )")
 
-    p_convert = sub.add_parser(
-        "convert",
-        help="Descarrega PDFs e converte para TXT, atualizando conv_ok na BD.",
-    )
-    p_convert.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Limita nº de documentos a converter (se suportado).",
-    )
-    p_convert.set_defaults(func=cmd_convert)
+    args = ap.parse_args()
 
-    p_run = sub.add_parser(
-        "run",
-        help="Pipeline: init-db + collect + convert (modo '1 clique').",
-    )
-    p_run.add_argument("--days", type=int, default=1, help="Janela temporal em dias.")
-    p_run.add_argument(
-        "--reset-checkpoint",
-        action="store_true",
-        help="Remove o checkpoint (aplica ao collect).",
-    )
-    p_run.add_argument(
-        "--force-full-window",
-        action="store_true",
-        help="Ignora checkpoint (aplica ao collect).",
-    )
-    p_run.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Limita nº de documentos a converter (se suportado).",
-    )
-    p_run.set_defaults(func=cmd_run)
+    if args.cmd == "list":
+        rows = api.list_diplomas(
+            tipo=args.tipo or None,
+            tipo_in=_parse_csv_list(args.tipo_in),
+            tipo_not_in=_parse_csv_list(args.tipo_not_in),
+            ano=args.ano or None,
+            date_from=args.date_from or None,
+            date_to=args.date_to or None,
+            q=args.q or None,
+            limit=args.limit,
+            offset=args.offset,
+            order_by=args.order_by,
+        )
+        for r in rows:
+            # compact output
+            print(
+                f"{r.get('data_publicacao','')}\t{r.get('tipo_slug','')}\t{r.get('ano','')}/{r.get('numero','')}\t{r.get('titulo','')}"
+            )
 
-    return parser
+    elif args.cmd == "stats-tipo":
+        rows = api.stats_by_tipo(
+            date_from=args.date_from or None,
+            date_to=args.date_to or None,
+            q=args.q or None,
+            top=args.top,
+        )
+        for r in rows:
+            print(f"{r.get('tipo_slug','') or '—'}\t{r.get('n',0)}")
+
+    elif args.cmd == "export":
+        outp = api.export_csv(
+            args.out,
+            delimiter=args.delimiter,
+            tipo=args.tipo or None,
+            tipo_in=_parse_csv_list(args.tipo_in),
+            tipo_not_in=_parse_csv_list(args.tipo_not_in),
+            ano=args.ano or None,
+            date_from=args.date_from or None,
+            date_to=args.date_to or None,
+            q=args.q or None,
+            limit=args.limit,
+            offset=args.offset,
+            order_by=args.order_by,
+        )
+        print(f"✅ Exportado: {outp}")
+    else:
+        raise SystemExit(f"Comando desconhecido: {args.cmd}")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    # ✅ logging configurado ANTES de executar subcomandos
-    _configure_logging(debug=args.debug)
-    logger.debug("Args: %s", args)
-
-    return int(args.func(args))
+if __name__ == "__main__":
+    main()
