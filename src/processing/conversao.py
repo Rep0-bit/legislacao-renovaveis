@@ -11,8 +11,11 @@ import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+from ..core.paths import DATA_DIR, ensure_app_dirs
+
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-DEFAULT_OUT_DIR = Path("data")
+ensure_app_dirs()
+DEFAULT_OUT_DIR = DATA_DIR
 BASE_DR = "https://diariodarepublica.pt"
 
 

@@ -5,7 +5,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path("data") / "diplomas.sqlite3"
+from ..core.paths import DEFAULT_DB_PATH
+
+DB_PATH = DEFAULT_DB_PATH
 
 
 def get_conn(db_path: Any | None = None) -> sqlite3.Connection:
@@ -97,6 +99,14 @@ def init_db(db_path: Any | None = None) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_diplomas_data_publicacao
             ON diplomas(data_publicacao)
+            """
+        )
+
+        # Chave canónica do upsert (necessária para ON CONFLICT em upsert_diploma)
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_diplomas_tipo_numero_ano
+            ON diplomas(tipo, numero, ano)
             """
         )
 

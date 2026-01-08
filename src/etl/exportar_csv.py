@@ -6,9 +6,11 @@ import csv
 from collections.abc import Sequence
 from pathlib import Path
 
+from ..core.paths import INDEX_DIR, ensure_app_dirs
 from ..db.db import get_conn, init_db
 
-DEFAULT_OUT = Path("data/index/leis_renovaveis.csv")
+ensure_app_dirs()
+DEFAULT_OUT = INDEX_DIR / "leis_renovaveis.csv"
 
 SQL_EXPORT = """
 SELECT

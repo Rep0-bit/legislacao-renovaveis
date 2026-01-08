@@ -26,6 +26,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from ..config.logging_setup import setup_logging
+from ..core.paths import DEBUG_DIR, REPORTS_DIR, ensure_app_dirs
 from ..db.db import get_conn, init_db
 from ..processing.indexador import _get_existing, _is_manual, make_hash, upsert_diploma
 
@@ -797,7 +798,7 @@ def extract_meta_from_detail_html(
     rss_title: str = "",
     rss_desc: str = "",
     dump_html_shell: bool = False,
-    dump_dir: Path = Path("data/debug/html_shell"),
+    dump_dir: Path | None = None,
 ) -> dict:
     soup = _make_soup(detail_html)
 
@@ -1031,7 +1032,10 @@ def _text_len_for_report(
     return len((base or "").strip())
 
 
-def write_report(report_rows: list[dict], out_dir: Path = Path("data/index/reports")) -> Path:
+def write_report(report_rows: list[dict], out_dir: Path | None = None) -> Path:
+    ensure_app_dirs()
+    if out_dir is None:
+        out_dir = REPORTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = out_dir / f"relatorio_coleta_{ts}.csv"
@@ -1269,7 +1273,7 @@ def collect(
 
     # DEBUG: guardar RSS bruto em disco
     if dump_html_shell:
-        debug_dir = Path("data/debug")
+        debug_dir = DEBUG_DIR
         debug_dir.mkdir(parents=True, exist_ok=True)
         rss_path = debug_dir / "rss_serie1.xml"
         rss_path.write_bytes(rss)

@@ -8,6 +8,8 @@ import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+from ..core.paths import DATA_DIR, ensure_app_dirs
+
 # -----------------------------
 # CONFIG (ajusta aqui)
 # -----------------------------
@@ -18,7 +20,8 @@ URL_DETALHE = "https://diariodarepublica.pt/dr/detalhe/decreto-lei/15-2022-17763
 URL_PDF_DIRETO = "https://files.diariodarepublica.pt/1s/2022/01/01000/0000300185.pdf"
 # URL_PDF_DIRETO = None
 
-OUT_DIR = Path("data")
+ensure_app_dirs()
+OUT_DIR = DATA_DIR
 HEADERS = {"User-Agent": "Mozilla/5.0"}  # ajuda a evitar bloqueios básicos
 
 

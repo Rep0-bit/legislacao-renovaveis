@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .core.models import ConvertResult
+from .core.paths import DATA_DIR, REPORTS_DIR
 from .db.db import get_conn, init_db
 from .processing.conversao import converter
 from .utils.csv_utils import open_csv_reader
-
-REPORTS_DIR = Path("data/index/reports")
 
 
 def _agora_utc_iso() -> str:
@@ -143,7 +142,7 @@ def listar_para_converter_modo_bd(
 def run_convert(
     *,
     db_path: Path | None = None,
-    out_dir: Path = Path("data"),
+    out_dir: Path = DATA_DIR,
     only_missing: bool = True,
     limit: int | None = None,
     from_latest_report: bool = False,

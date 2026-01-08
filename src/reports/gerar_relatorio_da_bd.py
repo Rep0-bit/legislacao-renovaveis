@@ -7,9 +7,11 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..core.paths import REPORTS_DIR, ensure_app_dirs
 from ..db.db import get_conn, init_db
 
-DEFAULT_OUT_DIR = Path("data/index/reports")
+ensure_app_dirs()
+DEFAULT_OUT_DIR = REPORTS_DIR
 
 
 SQL = """
