@@ -7,6 +7,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..db.db import get_conn
+from ..utils.normalize import (
+    normalize_numero,
+    normalize_numero_display,
+    normalize_search_text,
+    slugify_ascii_kebab,
+)
 
 
 def make_hash(data: dict[str, Any]) -> str:
@@ -94,6 +100,14 @@ def _is_manual(existing: dict[str, Any] | None, incoming: dict[str, Any]) -> boo
     )
 
 
+def _compute_tipo_slug(reg: dict[str, Any], tipo_fallback: str) -> str:
+    # prioridade: tipo_slug vindo do coletor (ex.: inferido do URL/título)
+    ts = str(reg.get("tipo_slug") or "").strip()
+    if ts:
+        return slugify_ascii_kebab(ts)
+    return slugify_ascii_kebab(tipo_fallback)
+
+
 def upsert_diploma(
     reg: dict[str, Any], db_path: Any | None = None
 ) -> tuple[str, bool, str | None, str | None]:
@@ -105,7 +119,6 @@ def upsert_diploma(
     """
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-    # id_dr pode existir e colidir com outra chave: resolver antes do insert
     incoming_id_dr = (reg.get("id_dr") or "").strip()
     existing_key = _get_key_by_id_dr(incoming_id_dr, db_path=db_path)
 
@@ -115,8 +128,6 @@ def upsert_diploma(
     if not (tipo and numero and ano):
         raise ValueError("upsert_diploma requer tipo/numero/ano")
 
-    # Se já há um registo com este id_dr, forçamos a chave para a chave existente na BD
-    # para evitar UNIQUE constraint failed: diplomas.id_dr
     if existing_key is not None:
         tipo_s, numero_s, ano_i = existing_key
     else:
@@ -124,7 +135,6 @@ def upsert_diploma(
         numero_s = str(numero)
         ano_i = int(ano)
 
-    # hash do "conteúdo fonte" (não inclui timestamps)
     new_hash = make_hash(reg)
 
     existing = _get_existing(tipo_s, numero_s, ano_i, db_path=db_path)
@@ -133,15 +143,25 @@ def upsert_diploma(
     status = "novo" if existing is None else ("inalterado" if old_hash == new_hash else "atualizado")
     is_manual = _is_manual(existing, reg)
 
+    tipo_slug = _compute_tipo_slug(reg, tipo_s)
+    numero_norm = normalize_numero(numero_s)
+    numero_display = normalize_numero_display(numero_s, ano=ano_i)
+    titulo_norm = normalize_search_text(str(reg.get("titulo") or ""))
+    sumario_norm = normalize_search_text(str(reg.get("sumario") or ""))
+
     payload: dict[str, Any] = {
         "id_dr": incoming_id_dr or (existing.get("id_dr") if existing else None),
         "tipo": tipo_s,
-        "tipo_slug": (reg.get("tipo_slug") or None),
+        "tipo_slug": tipo_slug or None,
         "numero": numero_s,
+        "numero_norm": numero_norm or None,
+        "numero_display": numero_display or None,
         "ano": ano_i,
         "data_publicacao": reg.get("data_publicacao"),
         "titulo": reg.get("titulo"),
         "sumario": reg.get("sumario"),
+        "titulo_norm": titulo_norm or None,
+        "sumario_norm": sumario_norm or None,
         "url_detalhe": reg.get("url_detalhe"),
         "url_pdf": reg.get("url_pdf"),
         "url_consolidado": reg.get("url_consolidado"),
@@ -157,15 +177,15 @@ def upsert_diploma(
             """
             INSERT INTO diplomas (
                 id_dr,
-                tipo, tipo_slug, numero, ano,
-                data_publicacao, titulo, sumario,
+                tipo, tipo_slug, numero, numero_norm, numero_display, ano,
+                data_publicacao, titulo, sumario, titulo_norm, sumario_norm,
                 url_detalhe, url_pdf, url_consolidado,
                 resumo_1_frase, observacoes,
                 estado, ultima_verificacao, hash_fonte
             ) VALUES (
                 :id_dr,
-                :tipo, :tipo_slug, :numero, :ano,
-                :data_publicacao, :titulo, :sumario,
+                :tipo, :tipo_slug, :numero, :numero_norm, :numero_display, :ano,
+                :data_publicacao, :titulo, :sumario, :titulo_norm, :sumario_norm,
                 :url_detalhe, :url_pdf, :url_consolidado,
                 :resumo_1_frase, :observacoes,
                 :estado, :ultima_verificacao, :hash_fonte
@@ -174,20 +194,22 @@ def upsert_diploma(
                 id_dr=COALESCE(NULLIF(excluded.id_dr,''), diplomas.id_dr),
 
                 tipo_slug=COALESCE(NULLIF(excluded.tipo_slug,''), diplomas.tipo_slug),
+                numero_norm=COALESCE(NULLIF(excluded.numero_norm,''), diplomas.numero_norm),
+                numero_display=COALESCE(NULLIF(excluded.numero_display,''), diplomas.numero_display),
 
                 data_publicacao=excluded.data_publicacao,
                 titulo=excluded.titulo,
                 sumario=excluded.sumario,
+                titulo_norm=excluded.titulo_norm,
+                sumario_norm=excluded.sumario_norm,
 
                 url_detalhe=excluded.url_detalhe,
                 url_pdf=excluded.url_pdf,
                 url_consolidado=excluded.url_consolidado,
 
-                -- não sobrescrever campos manuais se vierem vazios
                 resumo_1_frase=COALESCE(NULLIF(excluded.resumo_1_frase,''), diplomas.resumo_1_frase),
                 observacoes=COALESCE(NULLIF(excluded.observacoes,''), diplomas.observacoes),
 
-                -- estado não deve ser esvaziado
                 estado=COALESCE(NULLIF(excluded.estado,''), diplomas.estado),
 
                 ultima_verificacao=excluded.ultima_verificacao,

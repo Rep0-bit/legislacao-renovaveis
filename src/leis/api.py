@@ -6,9 +6,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Literal
 
-# NOTE: B9 should be read-only queries + exports. Avoid importing conversion/LLM pipeline here.
-
-
 OrderBy = Literal[
     "data_publicacao_desc",
     "data_publicacao_asc",
@@ -19,31 +16,23 @@ OrderBy = Literal[
 ]
 
 
-def _get_db_conn() -> sqlite3.Connection:
-    """Return a SQLite connection using project's db module when available.
+def _resolve_db_path(db_path: str | Path | None) -> str:
+    if db_path:
+        return str(Path(db_path).resolve())
 
-    Falls back to connecting directly via DB_PATH.
-    """
-    try:
-        # Preferred: project helper
-        from ..db.db import get_conn  # type: ignore
+    # default do projeto
+    from ..db.db import DB_PATH  # type: ignore
 
-        return get_conn()
-    except Exception:
-        from ..db.db import DB_PATH  # type: ignore
+    return str(Path(DB_PATH).resolve())
 
-        return sqlite3.connect(DB_PATH)
+
+def _get_db_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
+    return sqlite3.connect(_resolve_db_path(db_path))
 
 
 def _row_to_dict(cur: sqlite3.Cursor, row: sqlite3.Row) -> dict[str, Any]:
-    cols = [d[0] for d in cur.description or []]
+    cols = [d[0] for d in (cur.description or [])]
     return {cols[i]: row[i] for i in range(len(cols))}
-
-
-def _parse_csv_list(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [p.strip().lower() for p in value.split(",") if p.strip()]
 
 
 def _apply_filters(
@@ -63,13 +52,13 @@ def _apply_filters(
         params.append(tipo.strip().lower())
 
     if tipo_in:
-        tipo_in_list = [t.strip().lower() for t in tipo_in if str(t).strip()]
+        tipo_in_list = [str(t).strip().lower() for t in tipo_in if str(t).strip()]
         if tipo_in_list:
             where.append(f"tipo_slug IN ({','.join(['?'] * len(tipo_in_list))})")
             params.extend(tipo_in_list)
 
     if tipo_not_in:
-        tipo_not_in_list = [t.strip().lower() for t in tipo_not_in if str(t).strip()]
+        tipo_not_in_list = [str(t).strip().lower() for t in tipo_not_in if str(t).strip()]
         if tipo_not_in_list:
             where.append(f"tipo_slug NOT IN ({','.join(['?'] * len(tipo_not_in_list))})")
             params.extend(tipo_not_in_list)
@@ -87,17 +76,32 @@ def _apply_filters(
         params.append(date_to)
 
     if q:
-        qv = f"%{q.strip()}%"
-        where.append("(titulo LIKE ? OR sumario LIKE ?)")
-        params.extend([qv, qv])
+        from ..utils.normalize import normalize_search_text
+
+        q_raw = q.strip()
+        qv = f"%{q_raw}%"
+        qv2 = f"%{q_raw.replace('/', '-')}%" if "/" in q_raw else qv
+
+        q_norm = normalize_search_text(q_raw)
+        qvn = f"%{q_norm}%" if q_norm else qv
+
+        where.append(
+            "("
+            "titulo LIKE ? OR sumario LIKE ? "
+            "OR numero LIKE ? OR numero_norm LIKE ? "
+            "OR numero_display LIKE ? OR numero_display LIKE ? "
+            "OR titulo_norm LIKE ? OR sumario_norm LIKE ?"
+            ")"
+        )
+        params.extend([qv, qv, qv, qv, qv, qv2, qvn, qvn])
 
 
 def _order_by_sql(order_by: OrderBy) -> str:
-    mapping = {
+    mapping: dict[str, str] = {
         "data_publicacao_desc": "data_publicacao DESC, id DESC",
         "data_publicacao_asc": "data_publicacao ASC, id ASC",
-        "ano_desc": "ano DESC, numero DESC, id DESC",
-        "ano_asc": "ano ASC, numero ASC, id ASC",
+        "ano_desc": "ano DESC, COALESCE(numero_norm, numero) DESC, id DESC",
+        "ano_asc": "ano ASC, COALESCE(numero_norm, numero) ASC, id ASC",
         "id_desc": "id DESC",
         "id_asc": "id ASC",
     }
@@ -106,6 +110,7 @@ def _order_by_sql(order_by: OrderBy) -> str:
 
 def list_diplomas(
     *,
+    db_path: str | Path | None = None,
     tipo: str | None = None,
     tipo_in: Iterable[str] | None = None,
     tipo_not_in: Iterable[str] | None = None,
@@ -117,9 +122,13 @@ def list_diplomas(
     offset: int = 0,
     order_by: OrderBy = "data_publicacao_desc",
 ) -> list[dict[str, Any]]:
-    """List diplomas with optional filters. Dates should be YYYY-MM-DD."""
     limit = max(1, min(int(limit), 500))
     offset = max(0, int(offset))
+
+    # garante schema (ADD COLUMN leves) antes de usar colunas recentes
+    from ..db.db import init_db
+
+    init_db(db_path=db_path)
 
     sql = """
     SELECT
@@ -127,6 +136,8 @@ def list_diplomas(
       tipo_slug,
       tipo,
       numero,
+      numero_norm,
+      numero_display,
       ano,
       data_publicacao,
       titulo,
@@ -157,7 +168,7 @@ def list_diplomas(
     sql += f" ORDER BY {_order_by_sql(order_by)} LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
-    conn = _get_db_conn()
+    conn = _get_db_conn(db_path)
     try:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -170,12 +181,17 @@ def list_diplomas(
 
 def stats_by_tipo(
     *,
+    db_path: str | Path | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     q: str | None = None,
     top: int = 50,
 ) -> list[dict[str, Any]]:
     top = max(1, min(int(top), 500))
+
+    from ..db.db import init_db
+
+    init_db(db_path=db_path)
     sql = """
     SELECT
       COALESCE(tipo_slug, '') AS tipo_slug,
@@ -190,7 +206,7 @@ def stats_by_tipo(
     sql += " GROUP BY COALESCE(tipo_slug, '') ORDER BY n DESC, tipo_slug ASC LIMIT ?"
     params.append(top)
 
-    conn = _get_db_conn()
+    conn = _get_db_conn(db_path)
     try:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -204,19 +220,21 @@ def stats_by_tipo(
 def export_csv(
     out_path: str | Path,
     *,
+    db_path: str | Path | None = None,
     delimiter: str = ";",
     **kwargs: Any,
 ) -> Path:
-    """Export filtered diplomas to CSV. kwargs forwarded to list_diplomas()."""
     outp = Path(out_path)
     outp.parent.mkdir(parents=True, exist_ok=True)
-    rows = list_diplomas(**kwargs)
+    rows = list_diplomas(db_path=db_path, **kwargs)
 
     fieldnames = [
         "id",
         "tipo_slug",
         "tipo",
         "numero",
+        "numero_norm",
+        "numero_display",
         "ano",
         "data_publicacao",
         "titulo",
