@@ -51,4 +51,4 @@ build/
 dist/
 
 # Ad-hoc helper scripts (mantidos fora do repo)
-scripts/
+#scripts/
