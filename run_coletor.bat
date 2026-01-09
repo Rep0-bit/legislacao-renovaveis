@@ -26,6 +26,11 @@ set "DAYS=14"
 set "LOG_LEVEL=INFO"
 set "OPEN_REPORTS=1"
 
+set "DEBUG_MODE=0"
+set "FORCE_FULL=0"
+set "RESET_CKPT=0"
+set "EXTRA_ARGS="
+
 cls
 echo ============================================================
 echo  Legislacao Renovaveis - Coletor (Launcher)
@@ -49,31 +54,61 @@ set /p "DAYS=Days (janela em dias) [%DAYS%]: "
 if "%DAYS%"=="" set "DAYS=14"
 
 echo.
-set /p "OPEN_REPORTS=Abrir pasta de reports no fim? (S/N) [S]: "
-if /I "%OPEN_REPORTS%"=="" set "OPEN_REPORTS=S"
+set /p "DEBUG_IN=Modo debug? (S/N) [N]: "
+if "%DEBUG_IN%"=="" set "DEBUG_IN=N"
+if /I "%DEBUG_IN%"=="S" set "DEBUG_MODE=1"
+if /I "%DEBUG_IN%"=="Y" set "DEBUG_MODE=1"
 
-REM Normalizar OPEN_REPORTS para 1/0
-if /I "%OPEN_REPORTS%"=="S" set "OPEN_REPORTS=1"
-if /I "%OPEN_REPORTS%"=="Y" set "OPEN_REPORTS=1"
-if /I "%OPEN_REPORTS%"=="N" set "OPEN_REPORTS=0"
+echo.
+set /p "FORCE_IN=Force full window (reprocessar janela)? (S/N) [N]: "
+if "%FORCE_IN%"=="" set "FORCE_IN=N"
+if /I "%FORCE_IN%"=="S" set "FORCE_FULL=1"
+if /I "%FORCE_IN%"=="Y" set "FORCE_FULL=1"
 
-REM Se for sem_keywords_portarias, adicionar --no-keywords
+echo.
+set /p "RESET_IN=Reset checkpoint? (S/N) [N]: "
+if "%RESET_IN%"=="" set "RESET_IN=N"
+if /I "%RESET_IN%"=="S" set "RESET_CKPT=1"
+if /I "%RESET_IN%"=="Y" set "RESET_CKPT=1"
+
+echo.
+set /p "OPEN_IN=Abrir pasta de reports no fim? (S/N) [S]: "
+if "%OPEN_IN%"=="" set "OPEN_IN=S"
+if /I "%OPEN_IN%"=="S" set "OPEN_REPORTS=1"
+if /I "%OPEN_IN%"=="Y" set "OPEN_REPORTS=1"
+if /I "%OPEN_IN%"=="N" set "OPEN_REPORTS=0"
+
+echo.
+set /p "EXTRA_ARGS=Args extra (opcional, ex: --types portaria,resolucao) []: "
+
+REM --- Flags derivadas ---
 set "EXTRA="
-if /I "%PROFILE%"=="sem_keywords_portarias" set "EXTRA=--no-keywords"
+
+REM Profile sem keywords -> garantir flag mesmo que defaults mudem
+if /I "%PROFILE%"=="sem_keywords_portarias" set "EXTRA=%EXTRA% --no-keywords"
+
+if "%DEBUG_MODE%"=="1" (
+  set "EXTRA=%EXTRA% --debug"
+  set "LOG_LEVEL=DEBUG"
+)
+
+if "%FORCE_FULL%"=="1" set "EXTRA=%EXTRA% --force-full-window"
+if "%RESET_CKPT%"=="1" set "EXTRA=%EXTRA% --reset-checkpoint"
 
 cls
 echo ============================================================
 echo  A correr...
 echo ============================================================
-echo EXE:     %EXE%
-echo PROFILE: %PROFILE%
-echo DAYS:    %DAYS%
+echo EXE:       %EXE%
+echo PROFILE:   %PROFILE%
+echo DAYS:      %DAYS%
+echo LOG_LEVEL: %LOG_LEVEL%
 echo.
 echo Comando:
-echo   "%EXE%" --profile "%PROFILE%" --days %DAYS% --log-level %LOG_LEVEL% %EXTRA%
+echo   "%EXE%" --profile "%PROFILE%" --days %DAYS% --log-level %LOG_LEVEL%%EXTRA% %EXTRA_ARGS%
 echo.
 
-"%EXE%" --profile "%PROFILE%" --days %DAYS% --log-level %LOG_LEVEL% %EXTRA%
+"%EXE%" --profile "%PROFILE%" --days %DAYS% --log-level %LOG_LEVEL% %EXTRA% %EXTRA_ARGS%
 set "RC=%ERRORLEVEL%"
 
 echo.
