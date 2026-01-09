@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -88,6 +89,38 @@ DEFAULT_PROFILES: dict[str, dict] = {
 }
 
 
+@dataclass(frozen=True)
+class CollectResult:
+    """Resultado estruturado de uma execução do pipeline.
+
+    Mantém compatibilidade: o CLI ignora o return, mas quem chama via API/teste
+    pode inspecionar métricas e o caminho do relatório.
+    """
+
+    success: bool
+    error: str | None = None
+
+    # Métricas gerais
+    rss_items_total: int = 0
+    rss_items_window: int = 0
+    detail_links_found: int = 0
+    pdf_direct_used: int = 0
+
+    # Rejeições/falhas
+    fail_fetch: int = 0
+    rejected_kw: int = 0
+    rejected_parse: int = 0
+
+    # Resultado DB (ou dry-run)
+    novos: int = 0
+    atualizados: int = 0
+    inalterados: int = 0
+    manuais: int = 0
+
+    # Artefactos
+    report_path: Path | None = None
+
+
 def load_profiles(*, extra_path: Path | None = None) -> dict[str, dict]:
     """Carrega perfis de `src/config/profiles.json` (ou override via extra_path).
 
@@ -135,7 +168,7 @@ def collect(
     exclude_types: list[str] | None = None,
     strict_types: bool = False,
     profile: str | None = None,
-) -> None:
+) -> CollectResult:
     init_db()
 
     # B8: profiles (presets) — útil quando o coletor é chamado via API/testes.
@@ -206,7 +239,7 @@ def collect(
         rss = http_get(RSS_SERIE1_PDF)
     except FetchError as e:
         logger.error("❌ Falha a obter RSS: %s (%s)", e.url, e)
-        return
+        return CollectResult(success=False, error=f"Falha a obter RSS: {e.url} ({e})")
 
     # DEBUG: guardar RSS bruto em disco
     if dump_html_shell:
@@ -874,11 +907,29 @@ def collect(
     logger.info("   - inalterados: %d", counts["inalterado"])
     logger.info("   - manuais (entre os processados): %d", manual_count)
 
+    report_path: Path | None = None
     if report_rows:
         report_path = write_report(report_rows)
         logger.info("🧾 Relatório guardado: %s", report_path)
     else:
         logger.info("🧾 Relatório não gerado (nada processado nesta execução).")
 
+    return CollectResult(
+        success=True,
+        error=None,
+        rss_items_total=len(items),
+        rss_items_window=len(filtered),
+        detail_links_found=total_links,
+        pdf_direct_used=total_pdf_direct,
+        fail_fetch=fail_fetch,
+        rejected_kw=rejected_kw,
+        rejected_parse=rejected_parse,
+        novos=counts["novo"],
+        atualizados=counts["atualizado"],
+        inalterados=counts["inalterado"],
+        manuais=manual_count,
+        report_path=report_path,
+    )
 
-__all__ = ["collect", "DEFAULT_KEYWORDS", "DEFAULT_PROFILES", "load_profiles"]
+
+__all__ = ["collect", "DEFAULT_KEYWORDS", "DEFAULT_PROFILES", "load_profiles", "CollectResult"]
