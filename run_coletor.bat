@@ -71,6 +71,21 @@ if "%RESET_IN%"=="" set "RESET_IN=N"
 if /I "%RESET_IN%"=="S" set "RESET_CKPT=1"
 if /I "%RESET_IN%"=="Y" set "RESET_CKPT=1"
 
+REM --- Confirmação forte para reset ---
+if "%RESET_CKPT%"=="1" (
+  echo.
+  echo [AVISO] Vais fazer RESET do checkpoint incremental.
+  echo Isto pode fazer com que itens antigos voltem a ser processados.
+  echo.
+  set "CONFIRM="
+  set /p "CONFIRM=Para confirmar, escreve RESET (ou Enter para cancelar): "
+  if /I not "%CONFIRM%"=="RESET" (
+    echo.
+    echo [INFO] Reset cancelado.
+    set "RESET_CKPT=0"
+  )
+)
+
 echo.
 set /p "OPEN_IN=Abrir pasta de reports no fim? (S/N) [S]: "
 if "%OPEN_IN%"=="" set "OPEN_IN=S"
