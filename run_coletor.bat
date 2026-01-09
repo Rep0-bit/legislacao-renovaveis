@@ -1,6 +1,13 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
+REM ============================================================
+REM CONFIGURACAO (empresa)
+REM ============================================================
+REM PIN para entrar no modo avancado.
+REM Default requerido: 1234 (pode ser alterado internamente).
+set "ADMIN_PIN=1234"
+
 REM --- Consola UTF-8 (melhor para acentos) ---
 chcp 65001 >nul
 set "PYTHONUTF8=1"
@@ -34,7 +41,7 @@ echo ============================================================
 echo.
 echo Escolha o modo:
 echo   [1] Modo simples (recomendado)  - rotina normal, poucas opções
-echo   [2] Modo avançado (técnico)     - diagnóstico e ajustes finos
+echo   [2] Modo avançado               - ajustes úteis (acesso apenas com PIN)
 echo   [H] Ajuda                       - explicação detalhada das opções
 echo   [0] Sair
 echo.
@@ -46,7 +53,11 @@ if "%MODO%"=="" set "MODO=1"
 if /I "%MODO%"=="H" goto HELP
 if "%MODO%"=="0" exit /b 0
 if "%MODO%"=="1" goto MENU_SIMPLES
-if "%MODO%"=="2" goto MENU_AVANCADO
+if "%MODO%"=="2" (
+  call :ASK_PIN
+  if errorlevel 1 goto MENU_INICIAL
+  goto MENU_AVANCADO
+)
 
 echo.
 echo [ERRO] Opção inválida. Use 0, 1, 2 ou H.
@@ -66,48 +77,38 @@ echo.
 echo MODOS:
 echo   - Modo simples:
 echo       Para uso diário. Escolhe "o que rastrear" + "período".
-echo       (Evita opções técnicas que podem causar confusão.)
 echo.
-echo   - Modo avançado:
-echo       Para suporte/IT. Permite debug, reprocessamento e ajustes.
+echo   - Modo avançado (com PIN):
+echo       Para suporte/IT ou utilizadores autorizados. Permite:
+echo         - Debug (logs detalhados)
+echo         - Force full window (reprocessar tudo no período)
+echo         - Reset checkpoint (apagar estado incremental)
+echo         - Args extra (flags avançadas)
 echo.
-echo PERFIS (o que o coletor aceita):
-echo   - Rastreio completo (renovaveis_todos):
-echo       Todos os tipos de atos (portarias, DL, resoluções, etc.)
-echo       com filtro por palavras-chave.
+echo PERFIS:
+echo   - renovaveis_todos:
+echo       Todos os tipos com filtro por palavras-chave.
+echo   - renovaveis_portarias:
+echo       Só portarias com filtro por palavras-chave.
+echo   - sem_keywords_portarias:
+echo       Só portarias sem filtro por palavras-chave.
 echo.
-echo   - Apenas Portarias (renovaveis_portarias):
-echo       Só portarias, com filtro por palavras-chave.
-echo.
-echo   - Apenas Portarias sem filtro (sem_keywords_portarias):
-echo       Só portarias, ignora palavras-chave (aceita tudo no período).
-echo.
-echo PERÍODO A RASTREAR (days):
+echo PERÍODO (days):
 echo   - Número de dias para trás (ex.: 14, 30, 365).
-echo   - Exemplo: 30 = procurar atos publicados nos últimos 30 dias.
 echo.
 echo OPÇÕES TÉCNICAS (modo avançado):
 echo   - Debug:
-echo       Mostra logs detalhados para diagnóstico (mais informação).
-echo.
+echo       Logs muito detalhados (diagnóstico).
 echo   - Force full window:
-echo       Reprocessa TODOS os itens dentro do período (ignora incremental).
-echo       Útil após alterações de regras, ou para confirmar que nada falhou.
-echo.
+echo       Reprocessa todos os itens no período (ignora incremental).
 echo   - Reset checkpoint:
-echo       Apaga o estado incremental. Mais "forte" que force full window.
-echo       Requer confirmação por segurança.
-echo.
+echo       Apaga estado incremental (mais forte). Pede confirmação "RESET".
 echo   - Args extra:
-echo       Permite passar parâmetros adicionais (para utilizadores avançados).
-echo       Exemplos:
+echo       Flags adicionais. Exemplos:
 echo         --pdf-fallback-pages 12
 echo         --types portaria,decreto-lei
 echo         --exclude-types resolucao,despacho
 echo         --profiles-path "C:\...\profiles.json"
-echo.
-echo RELATÓRIO FINAL:
-echo   - No fim, pode abrir a pasta de relatórios (CSV) automaticamente.
 echo.
 echo Palavras-chave standard (informativo):
 echo   %KW_INFO%
@@ -182,7 +183,7 @@ goto RUN
 
 
 REM ============================================================
-REM MODO AVANÇADO (técnico)
+REM MODO AVANÇADO (com PIN)
 REM ============================================================
 :MENU_AVANCADO
 set "PROFILE=renovaveis_portarias"
@@ -198,7 +199,7 @@ set "EXTRA="
 
 cls
 echo ============================================================
-echo  Modo avançado (técnico)
+echo  Modo avançado (acesso autorizado)
 echo ============================================================
 echo.
 echo Perfis (o que rastrear):
@@ -238,7 +239,7 @@ if errorlevel 1 (
 
 echo.
 echo Opções de diagnóstico:
-echo   - Debug: mostra logs detalhados (útil para suporte).
+echo   - Debug: mostra logs detalhados.
 set "DEBUG_IN="
 set /p "DEBUG_IN=Ativar debug? (S/N) [N]: "
 if "%DEBUG_IN%"=="" set "DEBUG_IN=N"
@@ -256,7 +257,7 @@ if /I "%FORCE_IN%"=="Y" set "FORCE_FULL=1"
 
 echo.
 echo Atenção:
-echo   - Reset checkpoint: ação mais forte (pede confirmação).
+echo   - Reset checkpoint: apaga estado incremental (mais forte).
 set "RESET_IN="
 set /p "RESET_IN=Reset checkpoint? (S/N) [N]: "
 if "%RESET_IN%"=="" set "RESET_IN=N"
@@ -351,6 +352,49 @@ exit /b 0
 REM ============================================================
 REM FUNÇÕES AUXILIARES
 REM ============================================================
+:ASK_PIN
+if "%ADMIN_PIN%"=="" exit /b 0
+
+set "TRY=0"
+
+:PIN_LOOP
+set /a TRY+=1
+cls
+echo ============================================================
+echo  Modo avançado - Acesso restrito
+echo ============================================================
+echo.
+echo Para evitar alterações acidentais, o modo avançado requer PIN.
+echo.
+
+set "PIN_IN="
+set /p "PIN_IN=Introduza o PIN (ou Enter para cancelar): "
+if "%PIN_IN%"=="" (
+  echo.
+  echo [INFO] Operação cancelada.
+  timeout /t 1 >nul
+  exit /b 1
+)
+
+if "%PIN_IN%"=="%ADMIN_PIN%" (
+  echo.
+  echo [OK] Acesso autorizado.
+  timeout /t 1 >nul
+  exit /b 0
+)
+
+echo.
+echo [ERRO] PIN incorreto. Tentativa %TRY% de 3.
+if %TRY% GEQ 3 (
+  echo.
+  echo [BLOQUEADO] Demasiadas tentativas. A voltar ao menu.
+  timeout /t 2 >nul
+  exit /b 1
+)
+timeout /t 2 >nul
+goto PIN_LOOP
+
+
 :VALIDATE_DAYS
 set "D=%~1"
 echo %D%| findstr /r "^[0-9][0-9]*$" >nul
