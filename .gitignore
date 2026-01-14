@@ -57,3 +57,9 @@ dist/
 /dist/
 *.spec
 
+
+# scripts temporários
+fix_*.py
+src/archive/
+*.bak
+

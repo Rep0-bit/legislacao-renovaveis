@@ -6,14 +6,10 @@ import os
 import sys
 
 
-def setup_logging(level: str | None = None) -> None:
-    """
-    Logging consistente para CLI/app.
-
-    - Nível por defeito: INFO
-    - Pode ser definido por argumento ou env var LOG_LEVEL
-    - Logs para stdout (bom para PowerShell e redirecionamentos)
-    """
+def setup_logging(level=None):
+    if isinstance(level, int):
+        # converte 20 -> "INFO", 10 -> "DEBUG", etc.
+        level = logging.getLevelName(level)
     resolved = (level or os.getenv("LOG_LEVEL") or "INFO").upper()
 
     if resolved not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:

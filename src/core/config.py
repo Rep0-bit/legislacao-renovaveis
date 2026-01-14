@@ -13,6 +13,21 @@ except Exception:  # pragma: no cover
 from .paths import get_repo_root, get_user_data_dir
 
 
+def get_data_dir() -> Path:
+    """Diretório base de dados do projeto.
+
+    Mantido por compatibilidade com scripts que importam `get_data_dir` a partir
+    de `src.core.config`.
+    """
+
+    # Preferimos o diretório do projeto por defeito (repo_root/data), mas
+    # permitimos override por env (ver `src.core.paths.get_data_dir`).
+    from .paths import DEFAULT_DATA_DIR
+
+    DEFAULT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return DEFAULT_DATA_DIR
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Config de execução do coletor (pensado para uso por API / tarefas agendadas)."""

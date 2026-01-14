@@ -60,6 +60,58 @@ def _find_text_column(cols: set[str]) -> str | None:
     return None
 
 
+def _fix_mojibake(s: str | None) -> str | None:
+    """Best-effort fix for common UTF-8 text wrongly decoded as Latin-1/CP1252 (mojibake).
+
+    Example: "DiÃ¡rio" -> "Diário", "n.Âº" -> "n.º".
+    If no improvement is detected, returns the original string.
+    """
+    if s is None:
+        return None
+    s0 = str(s)
+    if not s0:
+        return s0
+
+    # Quick exit if it doesn't look like mojibake
+    if ("Ã" not in s0) and ("Â" not in s0):
+        return s0
+
+    def score(txt: str) -> tuple[int, int]:
+        # lower is better
+        # count common mojibake markers and unicode replacement char
+        return (txt.count("Ã") + txt.count("Â") + txt.count("�"), len(txt))
+
+    best = s0
+    best_score = score(s0)
+
+    # Try a few plausible repair paths
+    candidates: list[str] = []
+
+    for enc in ("latin-1", "cp1252"):
+        try:
+            b = s0.encode(enc, errors="replace")
+            candidates.append(b.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+
+    # Second pass: sometimes strings are double-mangled
+    for c in list(candidates):
+        if ("Ã" in c) or ("Â" in c):
+            for enc in ("latin-1", "cp1252"):
+                try:
+                    b = c.encode(enc, errors="replace")
+                    candidates.append(b.decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+
+    for c in candidates:
+        sc = score(c)
+        if sc < best_score:
+            best, best_score = c, sc
+
+    return best
+
+
 def _extract_text_from_conv_meta(meta_path: str | None) -> str | None:
     if not meta_path:
         return None
@@ -193,6 +245,10 @@ def export_llm(
         "url_pdf",
         "hash_fonte",
     ]
+    # Preferir colunas normalizadas, se existirem
+    for extra_norm in ("titulo_norm", "sumario_norm"):
+        if extra_norm in cols:
+            select_cols.append(extra_norm)
     for extra in ("conv_ok", "conv_at", "conv_doc_id", "conv_meta_path", "conv_error"):
         if extra in cols:
             select_cols.append(extra)
@@ -230,8 +286,21 @@ def export_llm(
         tipo = (_row_get(r, "tipo") or "").strip()
         numero = (_row_get(r, "numero") or "").strip()
         ano = _row_get(r, "ano")
-        titulo = (_row_get(r, "titulo") or "").strip()
-        sumario = (_row_get(r, "sumario") or "").strip()
+        titulo_raw = (_row_get(r, "titulo") or "").strip()
+        sumario_raw = (_row_get(r, "sumario") or "").strip()
+        titulo_norm = (_row_get(r, "titulo_norm") or "").strip()
+        sumario_norm = (_row_get(r, "sumario_norm") or "").strip()
+
+        titulo_raw_fixed = _fix_mojibake(titulo_raw)
+        sumario_raw_fixed = _fix_mojibake(sumario_raw)
+
+        # Prefer raw corrigido (preserva acentos/case). Fallback para *_norm se necessário.
+        titulo = (titulo_raw_fixed or "").strip()
+        sumario = (sumario_raw_fixed or "").strip()
+        if (not titulo) or ("Ã" in titulo or "Â" in titulo):
+            titulo = (_fix_mojibake(titulo_norm) or titulo_norm or titulo_raw or "").strip()
+        if (not sumario) or ("Ã" in sumario or "Â" in sumario):
+            sumario = (_fix_mojibake(sumario_norm) or sumario_norm or sumario_raw or "").strip()
 
         # Text resolution priority:
         # 1) text column (if exists)
@@ -265,21 +334,28 @@ def export_llm(
 
         text_clean = _clean_text_for_llm(text)
 
+        exported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
         meta: dict[str, Any] = {
             "id": rid,
             "tipo": tipo,
             "numero": numero,
             "ano": ano,
             "data_publicacao": _row_get(r, "data_publicacao"),
-            "titulo": titulo,
-            "sumario": sumario,
             "url_detalhe": _row_get(r, "url_detalhe"),
             "url_pdf": _row_get(r, "url_pdf"),
             "hash_fonte": _row_get(r, "hash_fonte"),
-            "exported_at": datetime.now(timezone.utc)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            # Raw (auditoria)
+            "titulo_raw": titulo_raw,
+            "titulo_raw_fixed": titulo_raw_fixed or None,
+            "sumario_raw": sumario_raw,
+            "sumario_raw_fixed": sumario_raw_fixed or None,
+            "titulo_norm": titulo_norm or None,
+            "sumario_norm": sumario_norm or None,
+            # Normalizado (para consumo)
+            "titulo": titulo,
+            "sumario": sumario,
+            "exported_at": exported_at,
             "text_sha256": _sha256_bytes(text_clean.encode("utf-8")),
             "text_len": len(text_clean),
         }

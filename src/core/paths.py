@@ -1,72 +1,88 @@
-# src/core/paths.py
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
-APP_DIR_NAME = "LegislacaoRenovaveis"
-ENV_BASE_DIR = "LEGRE_BASEDIR"
+
+def get_repo_root(start: str | Path | None = None) -> Path:
+    """Resolve o root do repositório (onde vive o pyproject.toml ou .git)."""
+    p = Path(start) if start is not None else Path(__file__).resolve()
+    if p.is_file():
+        p = p.parent
+    for parent in [p, *p.parents]:
+        if (parent / "pyproject.toml").exists() or (parent / ".git").exists():
+            return parent
+    return p
 
 
-def _default_base_dir() -> Path:
-    r"""Base dir para dados/runtime (não depende do CWD).
+def get_user_data_dir(app_name: str = "LegislacaoRenovaveis") -> Path:
+    """Diretório de dados por utilizador (Windows-first, com fallback)."""
+    local = os.getenv("LOCALAPPDATA")
+    if local:
+        return Path(local) / app_name
 
-    Windows: %LOCALAPPDATA%\LegislacaoRenovaveis
-    Linux:   ~/.local/share/legislacao-renovaveis
-    macOS:   ~/Library/Application Support/LegislacaoRenovaveis
-    """
-    if os.name == "nt":
-        root = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(root) / APP_DIR_NAME
+    home = Path.home()
 
     # macOS
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_DIR_NAME
+    if os.name == "posix" and (home / "Library").exists():
+        return home / "Library" / "Application Support" / app_name
 
-    # Linux/Unix
-    xdg = os.environ.get("XDG_DATA_HOME")
+    # Linux/posix
+    xdg = os.getenv("XDG_DATA_HOME")
     if xdg:
-        return Path(xdg) / "legislacao-renovaveis"
-    return Path.home() / ".local" / "share" / "legislacao-renovaveis"
+        return Path(xdg) / app_name
+
+    return home / ".local" / "share" / app_name
 
 
-def get_base_dir() -> Path:
-    """Devolve base dir configurável (override via env LEGRE_BASEDIR)."""
-    override = (os.environ.get(ENV_BASE_DIR) or "").strip()
-    if override:
-        return Path(override)
-    return _default_base_dir()
+# ---------------------------------------------------------------------------
+# Default paths (compat layer)
+# ---------------------------------------------------------------------------
+#
+# These constants are used across the project (DB, exports, conversions). They
+# also provide backward compatibility for earlier phases of the project where
+# modules imported `DEFAULT_DB_PATH`.
 
 
-BASE_DIR: Path = get_base_dir()
-DATA_DIR: Path = BASE_DIR / "data"
-INDEX_DIR: Path = DATA_DIR / "index"
-LOG_DIR: Path = BASE_DIR / "logs"
+def get_data_dir() -> Path:
+    """Resolve the project data directory.
 
-# Mantém compatibilidade com a estrutura existente "data/index/reports"
-REPORTS_DIR: Path = INDEX_DIR / "reports"
+    Priority:
+    1) LEGREN_DATA_DIR env var
+    2) <repo_root>/data
+    """
+    env = (os.getenv("LEGREN_DATA_DIR", "") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return (get_repo_root() / "data").resolve()
 
-DEBUG_DIR: Path = DATA_DIR / "debug"
-HTML_SHELL_DIR: Path = DEBUG_DIR / "html_shell"
 
-DEFAULT_DB_PATH: Path = DATA_DIR / "diplomas.sqlite3"
+DEFAULT_DATA_DIR: Path = get_data_dir()
+
+
+def get_default_db_path() -> Path:
+    """Default SQLite DB path (overridable via env)."""
+    env = (os.getenv("LEGREN_DB_PATH", "") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return (DEFAULT_DATA_DIR / "leis.sqlite3").resolve()
+
+
+# Kept for compatibility with existing imports
+DEFAULT_DB_PATH: Path = get_default_db_path()
+
+
+# Diretório para dumps e artefactos de debug (HTML/PDF shells, relatórios, etc.)
+DEBUG_DIR: Path = (DEFAULT_DATA_DIR / "debug").resolve()
+
+# Aliases usados por módulos antigos/externos
+DATA_DIR: Path = DEFAULT_DATA_DIR
+INDEX_DIR: Path = (DATA_DIR / "index").resolve()
+REPORTS_DIR: Path = (DATA_DIR / "reports").resolve()
 
 
 def ensure_app_dirs() -> None:
-    """Garante que as pastas base existem."""
-    for d in (DATA_DIR, INDEX_DIR, LOG_DIR, REPORTS_DIR, DEBUG_DIR, HTML_SHELL_DIR):
-        d.mkdir(parents=True, exist_ok=True)
+    """Garante que os diretórios standard existem."""
 
-
-def get_resource_root() -> Path:
-    """Root para recursos empacotados (PyInstaller).
-
-    - Em dev: .../src
-    - Em PyInstaller: sys._MEIPASS
-    """
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        return Path(meipass)
-    # src/core/paths.py -> src/
-    return Path(__file__).resolve().parents[1]
+    for p in (DATA_DIR, DEBUG_DIR, INDEX_DIR, REPORTS_DIR):
+        p.mkdir(parents=True, exist_ok=True)
