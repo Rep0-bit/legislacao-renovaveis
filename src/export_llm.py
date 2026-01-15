@@ -418,6 +418,12 @@ def export_llm(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Export diplomas to LLM-ready JSON + TXT")
     ap.add_argument("--out", default="", help="Output dir. Default: <data_dir>/llm")
+    ap.add_argument(
+        "--preset",
+        choices=["all", "decretos", "portarias", "renovaveis"],
+        default="",
+        help="Preset de export (atalho para filtros e state).",
+    )
     ap.add_argument("--limit", type=int, default=100, help="Max diplomas to export (default: 100)")
     ap.add_argument("--since", default="", help="Export diplomas desde YYYY-MM-DD")
     ap.add_argument("--since-id", type=int, default=0, help="Export diplomas com id >= N (prioritário)")
@@ -443,6 +449,30 @@ def main() -> None:
     ap.add_argument("--reset-state", action="store_true", help="Apaga o cursor desse estado e termina.")
 
     args = ap.parse_args()
+
+    # E3: presets (aplicam defaults apenas se o utilizador não especificou filtros)
+    preset = str(getattr(args, "preset", "") or "").strip().casefold()
+    if preset:
+        # tipo(s) só são aplicados se o utilizador não passou --tipo
+        if not list(args.tipo or []):
+            if preset == "decretos":
+                args.tipo = ["decreto-lei"]
+            elif preset == "portarias":
+                args.tipo = ["portaria"]
+            # preset=all/renovaveis não força tipos
+
+        # state só é aplicado se o utilizador não passou --state (mantém default)
+        if str(args.state) == "default":
+            if preset == "decretos":
+                args.state = "decretos"
+            elif preset == "portarias":
+                args.state = "portarias"
+            elif preset == "renovaveis":
+                args.state = "renovaveis"
+
+        # Nota: preset renovaveis prepara o state; o filtro por keywords/where entra no E4.
+        if preset == "renovaveis" and not str(args.where or "").strip():
+            print("ℹ️ preset=renovaveis: state preparado; filtro temático será adicionado no E4")
 
     tipos = list(args.tipo or [])
     state_key = _make_state_key(str(args.state), tipos)
