@@ -9,13 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from ..db.db import init_db
+from ..processing import indexador
 from ..utils.csv_utils import open_csv_reader
 
 
 @dataclass
 class ImportStats:
-    ok: int = 0
-    skipped: int = 0
+    novo: int = 0
+    atualizado: int = 0
+    inalterado: int = 0
     errors: int = 0
 
 
@@ -79,39 +81,84 @@ def import_csv(
                         "tipo": row.get("tipo"),
                         "numero": row.get("numero"),
                         "ano": row.get("ano"),
+                        "manual": "",
                         "note": err,
                     }
                 )
                 continue
 
-            stats.ok += 1
+            reg = {
+                "tipo": _norm(row.get("tipo")),
+                "numero": _norm(row.get("numero")),
+                "ano": int(_norm(row.get("ano"))),
+            }
+
+            for k in ("titulo", "sumario", "url_detalhe", "url_pdf", "data_publicacao"):
+                if _norm(row.get(k)):
+                    reg[k] = _norm(row.get(k))
+
+            if dry_run:
+                tipo_s = str(reg["tipo"])
+                numero_s = str(reg["numero"])
+                ano_i = int(reg["ano"])
+
+                existing = indexador._get_existing(tipo_s, numero_s, ano_i)
+                new_hash = indexador.make_hash(reg)
+                old_hash = existing["hash_fonte"] if existing else None
+
+                if existing is None:
+                    status = "novo"
+                elif old_hash == new_hash:
+                    status = "inalterado"
+                else:
+                    status = "atualizado"
+
+                is_manual = indexador._is_manual(existing, reg)
+                note = "dry-run"
+            else:
+                status, is_manual, _, _ = indexador.upsert_diploma(reg)
+                note = ""
+
+            if status == "novo":
+                stats.novo += 1
+            elif status == "atualizado":
+                stats.atualizado += 1
+            else:
+                stats.inalterado += 1
+
             report_rows.append(
                 {
                     "row": i,
-                    "status": "validated",
-                    "tipo": row.get("tipo"),
-                    "numero": row.get("numero"),
-                    "ano": row.get("ano"),
-                    "note": "dry-run" if dry_run else "validated",
+                    "status": status,
+                    "tipo": reg["tipo"],
+                    "numero": reg["numero"],
+                    "ano": reg["ano"],
+                    "manual": is_manual,
+                    "note": note,
                 }
             )
+
     finally:
         f.close()
 
     report_path = write_report(report_rows)
 
     if verbose:
-        print(f"🧾 Relatório: {report_path} | " f"ok={stats.ok} erros={stats.errors}")
+        print(
+            f"🧾 Relatório: {report_path} | "
+            f"novo={stats.novo} atualizado={stats.atualizado} "
+            f"inalterado={stats.inalterado} erros={stats.errors}"
+        )
 
     return stats
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="Importa diplomas de um CSV (validação / dry-run)")
+    ap = argparse.ArgumentParser(description="Importa diplomas de um CSV (upsert)")
     ap.add_argument("--csv", help="Caminho do CSV")
     ap.add_argument("--in", dest="csv_in", help="Alias de --csv")
     ap.add_argument("--delimiter", default=";", help="Separador (por defeito ';')")
-    ap.add_argument("--dry-run", action="store_true", help="Valida e gera relatório sem escrever na BD")
+    ap.add_argument("--dry-run", action="store_true", help="Simula o upsert sem escrever na BD")
     ap.add_argument("--quiet", action="store_true", help="Silencia logs (exceto erros fatais)")
     args = ap.parse_args(argv)
 
