@@ -79,10 +79,11 @@ DEBUG_DIR: Path = (DEFAULT_DATA_DIR / "debug").resolve()
 DATA_DIR: Path = DEFAULT_DATA_DIR
 INDEX_DIR: Path = (DATA_DIR / "index").resolve()
 REPORTS_DIR: Path = (DATA_DIR / "reports").resolve()
+LOGS_DIR: Path = (DATA_DIR / "logs").resolve()
 
 
 def ensure_app_dirs() -> None:
     """Garante que os diretórios standard existem."""
 
-    for p in (DATA_DIR, DEBUG_DIR, INDEX_DIR, REPORTS_DIR):
+    for p in (DATA_DIR, DEBUG_DIR, INDEX_DIR, REPORTS_DIR, LOGS_DIR):
         p.mkdir(parents=True, exist_ok=True)
