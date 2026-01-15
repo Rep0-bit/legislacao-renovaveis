@@ -19,6 +19,7 @@ class ExportSummary:
     exported: int
     skipped: int
     out_dir: Path
+    last_id: int | None = None  # E2: highest id processed in this run (for --continue state)
 
 
 # -----------------------------
@@ -32,12 +33,6 @@ def _sha256_bytes(b: bytes) -> str:
 
 def _norm_tipo(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip().casefold()
-
-
-def _safe_filename(s: str) -> str:
-    s = re.sub(r"[^\w\-]+", "_", (s or "").strip(), flags=re.UNICODE)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s or "item"
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -61,32 +56,22 @@ def _find_text_column(cols: set[str]) -> str | None:
 
 
 def _fix_mojibake(s: str | None) -> str | None:
-    """Best-effort fix for common UTF-8 text wrongly decoded as Latin-1/CP1252 (mojibake).
-
-    Example: "DiÃ¡rio" -> "Diário", "n.Âº" -> "n.º".
-    If no improvement is detected, returns the original string.
-    """
+    """Best-effort fix for common UTF-8 text wrongly decoded as Latin-1/CP1252 (mojibake)."""
     if s is None:
         return None
     s0 = str(s)
     if not s0:
         return s0
-
-    # Quick exit if it doesn't look like mojibake
     if ("Ã" not in s0) and ("Â" not in s0):
         return s0
 
     def score(txt: str) -> tuple[int, int]:
-        # lower is better
-        # count common mojibake markers and unicode replacement char
         return (txt.count("Ã") + txt.count("Â") + txt.count("�"), len(txt))
 
     best = s0
     best_score = score(s0)
 
-    # Try a few plausible repair paths
     candidates: list[str] = []
-
     for enc in ("latin-1", "cp1252"):
         try:
             b = s0.encode(enc, errors="replace")
@@ -94,7 +79,6 @@ def _fix_mojibake(s: str | None) -> str | None:
         except Exception:
             pass
 
-    # Second pass: sometimes strings are double-mangled
     for c in list(candidates):
         if ("Ã" in c) or ("Â" in c):
             for enc in ("latin-1", "cp1252"):
@@ -146,7 +130,6 @@ def _extract_text_from_conv_meta(meta_path: str | None) -> str | None:
                     except Exception:
                         return None
 
-    # Sometimes the text is inlined
     for key in ("texto_limpo", "texto", "text", "conteudo"):
         v = meta.get(key)
         if isinstance(v, str) and v.strip():
@@ -157,12 +140,10 @@ def _extract_text_from_conv_meta(meta_path: str | None) -> str | None:
 def _extract_text_from_doc_id(doc_id: str | None, data_dir: Path) -> str | None:
     if not doc_id:
         return None
-
     doc_id = str(doc_id).strip()
     if not doc_id:
         return None
 
-    # Common layouts: data/convert/<id>.txt, data/convert/txt/<id>.txt, data/convert/<id>/text.txt
     candidates = [
         data_dir / "convert" / f"{doc_id}.txt",
         data_dir / "convert" / f"{doc_id}.text",
@@ -184,24 +165,15 @@ def _extract_text_from_doc_id(doc_id: str | None, data_dir: Path) -> str | None:
 
 
 def _clean_text_for_llm(text: str) -> str:
-    # light normalization: collapse excessive whitespace but keep paragraph breaks
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Normalize line endings and trim trailing spaces
     text = "\n".join(line.rstrip() for line in text.split("\n"))
-    # Collapse 3+ blank lines -> 2
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-# -----------------------------
-# Core export
-# -----------------------------
-
-
 def _row_get(row, key: str, default=None):
-    """Compat helper for sqlite3.Row / dict."""
     try:
-        return row[key]  # sqlite3.Row supports mapping access
+        return row[key]
     except Exception:
         try:
             return row.get(key, default)  # type: ignore[attr-defined]
@@ -209,6 +181,45 @@ def _row_get(row, key: str, default=None):
             return default
 
 
+# -----------------------------
+# E2: state helpers (collector_state)
+# -----------------------------
+def _make_state_key(state: str, tipos: list[str]) -> str:
+    st = (state or "default").strip() or "default"
+    if tipos:
+        norm = sorted({_norm_tipo(t) for t in tipos if str(t).strip()})
+        tipos_key = ",".join(norm) if norm else "all"
+    else:
+        tipos_key = "all"
+    return f"export_llm:{st}:{tipos_key}"
+
+
+def _state_get(conn: sqlite3.Connection, key: str) -> int | None:
+    row = conn.execute("SELECT value FROM collector_state WHERE key = ?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        return int(row[0])
+    except Exception:
+        return None
+
+
+def _state_set(conn: sqlite3.Connection, key: str, value: int) -> None:
+    ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    conn.execute(
+        "INSERT INTO collector_state(key, value, updated_at) VALUES(?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, str(int(value)), ts),
+    )
+
+
+def _state_delete(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("DELETE FROM collector_state WHERE key = ?", (key,))
+
+
+# -----------------------------
+# Core export
+# -----------------------------
 def export_llm(
     *,
     out_dir: Path,
@@ -217,9 +228,11 @@ def export_llm(
     tipos: list[str] | None = None,
     write_text: bool = True,
     incremental: bool = True,
-    # E1: incremental windowing
+    # E1 filters
     since: str | None = None,
     since_id: int | None = None,
+    # E2 ordering: for --continue we must process ascending to avoid skipping by LIMIT
+    order: str = "desc",
 ) -> ExportSummary:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -235,7 +248,6 @@ def export_llm(
     cols = _table_columns(conn, "diplomas")
     text_col = _find_text_column(cols)
 
-    # Base select: keep robust to schema
     select_cols = [
         "id",
         "tipo",
@@ -248,7 +260,6 @@ def export_llm(
         "url_pdf",
         "hash_fonte",
     ]
-    # Preferir colunas normalizadas, se existirem
     for extra_norm in ("titulo_norm", "sumario_norm"):
         if extra_norm in cols:
             select_cols.append(extra_norm)
@@ -264,31 +275,22 @@ def export_llm(
 
     if tipos:
         wanted = [_norm_tipo(t) for t in tipos]
-        # case-insensitive match in SQLite: use lower() and bind params
         clauses.append("lower(tipo) IN (" + ", ".join(["?"] * len(wanted)) + ")")
         params.extend(wanted)
 
     if where_sql.strip():
         clauses.append(f"({where_sql.strip()})")
 
-    # -----------------------------
     # E1: incremental filters
-    # -----------------------------
-    # Priority: since_id > since
     if since_id is not None:
         clauses.append("id >= ?")
         params.append(int(since_id))
     elif since:
         since_s = str(since).strip()
-
-        # Find the earliest id among rows with data_publicacao >= since
         row = conn.execute(
-            "SELECT MIN(id) AS min_id FROM diplomas "
-            "WHERE data_publicacao IS NOT NULL AND data_publicacao >= ?",
+            "SELECT MIN(id) AS min_id FROM diplomas WHERE data_publicacao IS NOT NULL AND data_publicacao >= ?",
             (since_s,),
         ).fetchone()
-
-        # sqlite3.Row supports both index and key access
         min_id = 0
         if row is not None:
             try:
@@ -298,20 +300,16 @@ def export_llm(
                     min_id = int(row[0] or 0)
                 except Exception:
                     min_id = 0
-
-        # Filter:
-        # - keep rows with data_publicacao >= since
-        # - plus rows without data_publicacao using id >= min_id fallback
         clauses.append(
-            "((data_publicacao IS NOT NULL AND data_publicacao >= ?) "
-            "OR (data_publicacao IS NULL AND id >= ?))"
+            "((data_publicacao IS NOT NULL AND data_publicacao >= ?) OR (data_publicacao IS NULL AND id >= ?))"
         )
         params.extend([since_s, min_id])
 
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
 
-    sql += " ORDER BY id DESC"
+    ord_sql = "ASC" if str(order).lower().startswith("a") else "DESC"
+    sql += f" ORDER BY id {ord_sql}"
     sql += " LIMIT ?"
     params.append(int(limit))
 
@@ -320,9 +318,12 @@ def export_llm(
 
     exported = 0
     skipped = 0
+    last_id: int | None = None
 
     for r in rows:
         rid = int(r["id"])
+        last_id = rid if (last_id is None or rid > last_id) else last_id
+
         tipo = (_row_get(r, "tipo") or "").strip()
         numero = (_row_get(r, "numero") or "").strip()
         ano = _row_get(r, "ano")
@@ -334,7 +335,6 @@ def export_llm(
         titulo_raw_fixed = _fix_mojibake(titulo_raw)
         sumario_raw_fixed = _fix_mojibake(sumario_raw)
 
-        # Prefer raw corrigido (preserva acentos/case). Fallback para *_norm se necessário.
         titulo = (titulo_raw_fixed or "").strip()
         sumario = (sumario_raw_fixed or "").strip()
         if (not titulo) or ("Ã" in titulo or "Â" in titulo):
@@ -342,11 +342,6 @@ def export_llm(
         if (not sumario) or ("Ã" in sumario or "Â" in sumario):
             sumario = (_fix_mojibake(sumario_norm) or sumario_norm or sumario_raw or "").strip()
 
-        # Text resolution priority:
-        # 1) text column (if exists)
-        # 2) conv_meta_path -> referenced txt
-        # 3) conv_doc_id -> known txt paths under data dir
-        # 4) fallback: titulo + sumario
         text: str | None = None
         if text_col:
             v = _row_get(r, text_col)
@@ -360,7 +355,6 @@ def export_llm(
             text = _extract_text_from_doc_id(_row_get(r, "conv_doc_id"), data_dir)
 
         if not text:
-            # Minimal fallback so the export never hard-fails on schema
             parts = []
             if titulo:
                 parts.append(titulo)
@@ -373,7 +367,6 @@ def export_llm(
             continue
 
         text_clean = _clean_text_for_llm(text)
-
         exported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
         meta: dict[str, Any] = {
@@ -385,14 +378,12 @@ def export_llm(
             "url_detalhe": _row_get(r, "url_detalhe"),
             "url_pdf": _row_get(r, "url_pdf"),
             "hash_fonte": _row_get(r, "hash_fonte"),
-            # Raw (auditoria)
             "titulo_raw": titulo_raw,
             "titulo_raw_fixed": titulo_raw_fixed or None,
             "sumario_raw": sumario_raw,
             "sumario_raw_fixed": sumario_raw_fixed or None,
             "titulo_norm": titulo_norm or None,
             "sumario_norm": sumario_norm or None,
-            # Normalizado (para consumo)
             "titulo": titulo,
             "sumario": sumario,
             "exported_at": exported_at,
@@ -400,7 +391,6 @@ def export_llm(
             "text_len": len(text_clean),
         }
 
-        # Incremental: if meta exists with same sha, skip
         meta_path = out_dir / "meta" / f"{rid}.json"
         if incremental and meta_path.exists():
             try:
@@ -409,7 +399,6 @@ def export_llm(
                     skipped += 1
                     continue
             except Exception:
-                # if corrupted, re-write
                 pass
 
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -420,7 +409,7 @@ def export_llm(
 
         exported += 1
 
-    return ExportSummary(exported=exported, skipped=skipped, out_dir=out_dir)
+    return ExportSummary(exported=exported, skipped=skipped, out_dir=out_dir, last_id=last_id)
 
 
 # -----------------------------
@@ -446,19 +435,67 @@ def main() -> None:
         help="Re-export even if existing meta has same text hash.",
     )
 
+    # E2
+    ap.add_argument(
+        "--continue", dest="continue_export", action="store_true", help="Usa cursor guardado na BD."
+    )
+    ap.add_argument("--state", default="default", help="Nome do estado (default: default)")
+    ap.add_argument("--reset-state", action="store_true", help="Apaga o cursor desse estado e termina.")
+
     args = ap.parse_args()
 
+    tipos = list(args.tipo or [])
+    state_key = _make_state_key(str(args.state), tipos)
+
+    if bool(args.reset_state):
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            _state_delete(conn, state_key)
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"🧹 Estado limpo: {state_key}")
+        return
+
     out_dir = Path(args.out) if (args.out or "").strip() else (get_data_dir() / "llm")
+
+    since: str | None = str(args.since).strip() or None
+    since_id: int | None = args.since_id if int(args.since_id or 0) > 0 else None
+    order = "desc"
+    save_state = False
+
+    if bool(getattr(args, "continue_export", False)):
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            last = _state_get(conn, state_key)
+        finally:
+            conn.close()
+        since = None
+        since_id = (int(last) + 1) if last is not None else 1
+        order = "asc"
+        save_state = True
+        print(f"📤 Continue state={args.state} key={state_key} since-id={since_id}")
+
     summary = export_llm(
         out_dir=out_dir,
         limit=int(args.limit),
         where_sql=str(args.where or ""),
-        tipos=list(args.tipo or []),
+        tipos=tipos,
         write_text=not bool(args.no_text),
         incremental=not bool(args.no_incremental),
-        since=str(args.since).strip() or None,
-        since_id=args.since_id if args.since_id > 0 else None,
+        since=since,
+        since_id=since_id,
+        order=order,
     )
+
+    if save_state and summary.last_id is not None:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            _state_set(conn, state_key, int(summary.last_id))
+            conn.commit()
+        finally:
+            conn.close()
+
     print(f"Exported {summary.exported} diplomas to {summary.out_dir} (skipped={summary.skipped})")
 
 
