@@ -4,10 +4,10 @@ from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
-import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+from ..core.http import http_get
 from ..core.paths import DATA_DIR, ensure_app_dirs
 
 # -----------------------------
@@ -22,16 +22,13 @@ URL_PDF_DIRETO = "https://files.diariodarepublica.pt/1s/2022/01/01000/0000300185
 
 ensure_app_dirs()
 OUT_DIR = DATA_DIR
-HEADERS = {"User-Agent": "Mozilla/5.0"}  # ajuda a evitar bloqueios básicos
 
 
 # -----------------------------
 # HELPERS
 # -----------------------------
 def download(url: str) -> bytes:
-    r = requests.get(url, headers=HEADERS, timeout=60)
-    r.raise_for_status()
-    return r.content
+    return http_get(url)
 
 
 def make_doc_id_from_url(url: str) -> str:

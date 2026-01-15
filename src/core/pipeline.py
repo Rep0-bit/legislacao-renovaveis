@@ -11,9 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from ..config.logging_setup import setup_logging
+from ..core.http import FetchError, http_get as _core_http_get
 from ..db.db import DB_PATH, init_db
 from ..processing.indexador import upsert_diploma
 
@@ -59,13 +58,13 @@ class CollectResult:
 
 
 def http_get(url: str, *, timeout: int = 25, headers: dict[str, str] | None = None) -> bytes:
-    """GET básico (patchável nos testes)."""
-    hdrs = {"User-Agent": "Mozilla/5.0"}
-    if headers:
-        hdrs.update(headers)
-    r = requests.get(url, timeout=timeout, headers=hdrs)
-    r.raise_for_status()
-    return r.content
+    """GET básico (patchável nos testes).
+
+    Implementação real delega para `src.core.http.http_get` (Session + retries).
+    O parâmetro `headers` é mantido por compatibilidade com testes/patches.
+    """
+    _ = headers
+    return _core_http_get(url, timeout=timeout)
 
 
 def _parse_pubdate_raw(raw: str | None) -> datetime | None:
@@ -461,6 +460,14 @@ def collect(
             inalterados=inalterados,
             manuais=manuais,
             report_path=report_path,
+        )
+
+    except FetchError as e:
+        return CollectResult(
+            success=False,
+            error=str(e),
+            rss_items_total=0,
+            rss_items_window=0,
         )
 
     except Exception as e:

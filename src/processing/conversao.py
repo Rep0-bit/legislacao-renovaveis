@@ -7,22 +7,19 @@ from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+from ..core.http import http_get
 from ..core.paths import DATA_DIR, ensure_app_dirs
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
 ensure_app_dirs()
 DEFAULT_OUT_DIR = DATA_DIR
 BASE_DR = "https://diariodarepublica.pt"
 
 
-def download(url: str, timeout: int = 60) -> bytes:
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
-    r.raise_for_status()
-    return r.content
+def download(url: str, timeout: int = 20) -> bytes:
+    return http_get(url, timeout=timeout)
 
 
 def make_doc_id_from_url(url: str | bytes | bytearray | memoryview) -> str:
