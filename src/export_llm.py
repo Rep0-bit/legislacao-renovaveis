@@ -217,6 +217,9 @@ def export_llm(
     tipos: list[str] | None = None,
     write_text: bool = True,
     incremental: bool = True,
+    # E1: incremental windowing
+    since: str | None = None,
+    since_id: int | None = None,
 ) -> ExportSummary:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -267,6 +270,43 @@ def export_llm(
 
     if where_sql.strip():
         clauses.append(f"({where_sql.strip()})")
+
+    # -----------------------------
+    # E1: incremental filters
+    # -----------------------------
+    # Priority: since_id > since
+    if since_id is not None:
+        clauses.append("id >= ?")
+        params.append(int(since_id))
+    elif since:
+        since_s = str(since).strip()
+
+        # Find the earliest id among rows with data_publicacao >= since
+        row = conn.execute(
+            "SELECT MIN(id) AS min_id FROM diplomas "
+            "WHERE data_publicacao IS NOT NULL AND data_publicacao >= ?",
+            (since_s,),
+        ).fetchone()
+
+        # sqlite3.Row supports both index and key access
+        min_id = 0
+        if row is not None:
+            try:
+                min_id = int(row["min_id"] or 0)
+            except Exception:
+                try:
+                    min_id = int(row[0] or 0)
+                except Exception:
+                    min_id = 0
+
+        # Filter:
+        # - keep rows with data_publicacao >= since
+        # - plus rows without data_publicacao using id >= min_id fallback
+        clauses.append(
+            "((data_publicacao IS NOT NULL AND data_publicacao >= ?) "
+            "OR (data_publicacao IS NULL AND id >= ?))"
+        )
+        params.extend([since_s, min_id])
 
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
@@ -390,6 +430,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Export diplomas to LLM-ready JSON + TXT")
     ap.add_argument("--out", default="", help="Output dir. Default: <data_dir>/llm")
     ap.add_argument("--limit", type=int, default=100, help="Max diplomas to export (default: 100)")
+    ap.add_argument("--since", default="", help="Export diplomas desde YYYY-MM-DD")
+    ap.add_argument("--since-id", type=int, default=0, help="Export diplomas com id >= N (prioritário)")
     ap.add_argument("--where", default="", help="Optional SQL WHERE snippet (advanced).")
     ap.add_argument(
         "--tipo",
@@ -414,6 +456,8 @@ def main() -> None:
         tipos=list(args.tipo or []),
         write_text=not bool(args.no_text),
         incremental=not bool(args.no_incremental),
+        since=str(args.since).strip() or None,
+        since_id=args.since_id if args.since_id > 0 else None,
     )
     print(f"Exported {summary.exported} diplomas to {summary.out_dir} (skipped={summary.skipped})")
 
