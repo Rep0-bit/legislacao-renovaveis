@@ -64,3 +64,4 @@ src/archive/
 *.bak
 
 !tools/fix_url_detalhe.py
+config/
