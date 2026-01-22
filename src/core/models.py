@@ -33,3 +33,13 @@ class PipelineResult:
     inalterados: int
     manuais: int
     report_path: Path | None
+
+
+@dataclass(frozen=True)
+class ConvertResult:
+    """Métricas de conversão (PDF -> texto/meta)."""
+
+    processed: int
+    ok: int
+    error: int
+    skipped_no_pdf: int = 0

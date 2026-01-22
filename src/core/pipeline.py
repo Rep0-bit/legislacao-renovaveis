@@ -67,6 +67,91 @@ def http_get(url: str, *, timeout: int = 25, headers: dict[str, str] | None = No
     return _core_http_get(url, timeout=timeout)
 
 
+def _extract_pdf_url_from_detail(link: str, *, timeout: int = 25) -> str | None:
+    """Fetch DR detail page HTML and try to locate a PDF URL.
+
+    Returns the first .pdf URL found (absolute or relative).
+    """
+    if not link:
+        return None
+    try:
+        html_bytes = http_get(link, timeout=timeout)
+    except Exception:
+        return None
+
+    try:
+        html = html_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    # 1) absolute URLs
+    m = re.search(r"https?://[^\"'\s>]+\.pdf(?:\?[^\"'\s>]*)?", html, flags=re.IGNORECASE)
+    if m:
+        return m.group(0)
+
+    # 2) href="...pdf..."
+    m = re.search(r'href=["\']([^"\']+\.pdf[^"\']*)["\']', html, flags=re.IGNORECASE)
+    if not m:
+        return None
+
+    href = m.group(1).strip()
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return "https://diariodarepublica.pt" + href
+    return href or None
+
+
+def _build_pdf_url_from_title(title: str | None, pub_date_utc: datetime | None) -> str | None:
+    """Tenta construir a URL do PDF a partir do título do DR.
+
+    O DR publica PDFs em `https://files.diariodarepublica.pt/1s/YYYY/MM/DD/NNNN.pdf`.
+    Muitas entradas RSS *não* trazem `pdf_url` e a página de detalhe pode carregar o link
+    via JS; este fallback evita dependência de scraping frágil.
+
+    Requisitos mínimos:
+    - data (pub_date_utc ou extraída do título)
+    - número do Diário (ex.: "Diário da República n.º 12/2026")
+
+    Nota: não cobre suplementos/"2.ª série"; se o título indicar suplemento, devolve None.
+    """
+    if not title:
+        return None
+
+    t = title
+    # Se for suplemento, o ficheiro pode não seguir o padrão simples.
+    if "suplement" in t.casefold():
+        return None
+
+    # Ex.: "Diário da República n.º 12/2026, Série I de 2026-01-19"
+    m = re.search(r"Diário\s+da\s+República\s+n\.\s*º\s*(\d{1,4})/(\d{4})", t)
+    if not m:
+        # fallback para a versão sem acentos (às vezes vem como 'Diario')
+        m = re.search(r"Diario\s+da\s+Republica\s+n\.\s*º\s*(\d{1,4})/(\d{4})", t)
+    if not m:
+        return None
+
+    issue_num = int(m.group(1))
+
+    # Data: prefere pub_date_utc; senão tenta extrair "de YYYY-MM-DD" do título.
+    dt_utc = pub_date_utc
+    if dt_utc is None:
+        m2 = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", t)
+        if m2:
+            try:
+                dt_utc = datetime(int(m2.group(1)), int(m2.group(2)), int(m2.group(3)), tzinfo=timezone.utc)
+            except Exception:
+                dt_utc = None
+    if dt_utc is None:
+        return None
+
+    yyyy = dt_utc.year
+    mm = dt_utc.month
+    dd = dt_utc.day
+
+    return f"https://files.diariodarepublica.pt/1s/{yyyy:04d}/{mm:02d}/{dd:02d}/{issue_num:04d}.pdf"
+
+
 def _parse_pubdate_raw(raw: str | None) -> datetime | None:
     if not raw:
         return None
@@ -152,7 +237,9 @@ def write_report(path: Path, rows: list[dict[str, Any]]) -> None:
         "manual",
         "note",
     ]
-    with path.open("w", newline="", encoding="utf-8") as f:
+    # Usa BOM (utf-8-sig) para evitar mojibake no PowerShell/Excel (Windows)
+    # ao abrir diretamente o CSV.
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in rows:
@@ -166,7 +253,7 @@ def _ensure_reports_dir(report_dir: Path | None) -> Path:
 
 
 _RE_TITLE = re.compile(
-    r"^\s*(?P<tipo>.+?)\s+n\s*[\.ºo]?\s*(?P<num>\d+)\s*/\s*(?P<ano>\d{4})(?:\s*/\s*(?P<sub>\d+))?",
+    r"^\s*(?P<tipo>.+?)\s+n\s*[^0-9]{0,8}\s*(?P<num>\d+)\s*/\s*(?P<ano>\d{4})(?:\s*/\s*(?P<sub>\d+))?",
     re.IGNORECASE,
 )
 
@@ -268,7 +355,38 @@ def _normalize_upsert_result(res: Any) -> tuple[str, bool, str | None, str | Non
     return str(res), False, None, None
 
 
-def collect(
+def collect(*args, **kwargs):
+    """Compat wrapper.
+
+    Suporta chamadas antigas do coletor:
+
+        collect(keywords, days, ..., profile=..., debug=...)
+
+    Nesta versão, `keywords` é ignorado aqui porque o filtro
+    pode ser aplicado antes (no coletor/export) e porque o RSS
+    não garante sumários completos.
+    """
+    # positional: keywords, days
+    if args:
+        _ = args[0]  # keywords (ignored)
+        args = args[1:]
+    if args and isinstance(args[0], int):
+        kwargs.setdefault("days", args[0])
+        args = args[1:]
+    # compat flags
+    if "no_keywords" in kwargs and "keywords_enabled" not in kwargs:
+        kwargs["keywords_enabled"] = not bool(kwargs.pop("no_keywords"))
+
+    # `profile` pode vir posicional nas versões antigas; evita conflito
+    if args and "profile" not in kwargs:
+        kwargs["profile"] = args[0]
+        args = args[1:]
+
+    # ignora quaisquer posicionais remanescentes
+    return _collect_impl(**kwargs)
+
+
+def _collect_impl(
     profile: str | None = None,
     *,
     days: int = 7,
@@ -276,7 +394,9 @@ def collect(
     force_full_window: bool = False,
     keywords_enabled: bool = True,
     report_dir: Path | None = None,
+    debug: bool = False,
     rss_url: str = RSS_SERIE1_HTML,
+    **_ignored: object,
 ) -> CollectResult:
     """Executa recolha RSS -> DB.
 
@@ -321,6 +441,17 @@ def collect(
             title = (it.get("title") or "").strip()
             link = (it.get("link") or "").strip() or None
             pdf_url = (it.get("pdf_url") or "").strip() or None
+            if (not pdf_url) and link:
+                pdf_url = _extract_pdf_url_from_detail(link)
+
+            # Fallback: construir URL do PDF pelo padrão dos ficheiros do DR
+            # (útil quando a página de detalhe não expõe o PDF em HTML estático).
+            if not pdf_url:
+                pub_utc_tmp = it.get("pubDate_utc")
+                pdf_url = _build_pdf_url_from_title(
+                    title, pub_utc_tmp if isinstance(pub_utc_tmp, datetime) else None
+                )
+
             pub_utc = it.get("pubDate_utc")
 
             tipo, numero, ano = _infer_from_title(title)

@@ -2,14 +2,54 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
 
 from ..config.logging_setup import setup_logging
-from ..core.pipeline import DEFAULT_KEYWORDS, collect as pipeline_collect, load_profiles
+from ..core.pipeline import collect as pipeline_collect
 
 logger = logging.getLogger(__name__)
+
+
+def load_profiles(*, extra_path: Path | None = None) -> dict[str, dict]:
+    """Load profiles.json.
+
+    Search order:
+      1) extra_path (if provided)
+      2) ./config/profiles.json
+      3) ./profiles.json
+      4) ./data/profiles.json
+      5) project root inferred from __file__ (two levels up) + same paths
+
+    Returns {} if not found/invalid.
+    """
+    candidates: list[Path] = []
+    if extra_path is not None:
+        candidates.append(extra_path)
+
+    # CWD candidates (includes user's original layout)
+    candidates.append(Path("config") / "profiles.json")
+    candidates.append(Path("profiles.json"))
+    candidates.append(Path("data") / "profiles.json")
+
+    # project root from this file (src/collectors/... -> parents[2] is repo root)
+    try:
+        root = Path(__file__).resolve().parents[2]
+        candidates.append(root / "config" / "profiles.json")
+        candidates.append(root / "profiles.json")
+        candidates.append(root / "data" / "profiles.json")
+    except Exception:
+        pass
+
+    for p in candidates:
+        try:
+            if p and p.exists():
+                return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    return {}
 
 
 def apply_profile_to_args(
@@ -117,7 +157,7 @@ def main() -> None:
     ap.add_argument(
         "--keywords",
         nargs="*",
-        default=DEFAULT_KEYWORDS,
+        default=[],
         help="Lista de palavras-chave",
     )
     ap.add_argument(
@@ -157,8 +197,21 @@ def main() -> None:
     if args.list_profiles:
         profiles = load_profiles(extra_path=profiles_path)
         print("Perfis disponíveis:")
-        for name in sorted(name for name in profiles if name.strip()):
+        for name in sorted(name for name in profiles if str(name).strip()):
             print(f" - {name}")
+        if not profiles:
+            tried = []
+            if profiles_path is not None:
+                tried.append(str(profiles_path))
+            tried += [
+                "config/profiles.json",
+                "profiles.json",
+                "data/profiles.json",
+                "<root>/config/profiles.json",
+                "<root>/profiles.json",
+                "<root>/data/profiles.json",
+            ]
+            print("⚠️ Nenhum profile encontrado. Tentados:", "; ".join(tried))
         return
 
     # 2) Aplicar defaults do profile (flags explícitas continuam a ganhar)

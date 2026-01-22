@@ -1,4 +1,5 @@
-# src/runner_conversao.py
+# runner_conversao_relaxed.py
+# Drop-in replacement for src/runner_conversao.py
 from __future__ import annotations
 
 import argparse
@@ -82,10 +83,8 @@ def find_latest_report(reports_dir: Path = REPORTS_DIR) -> Path | None:
 
 def read_report_targets(report_path: Path, delimiter: str = ";") -> list[tuple[str, str, int]]:
     targets: list[tuple[str, str, int]] = []
-
     f, reader, enc = open_csv_reader(report_path, delimiter=delimiter)
     print(f"📄 Relatório lido com encoding: {enc}")
-
     try:
         for row in reader:
             status = (row.get("status") or "").strip().lower()
@@ -101,7 +100,6 @@ def read_report_targets(report_path: Path, delimiter: str = ";") -> list[tuple[s
             targets.append((tipo, numero, int(ano_s)))
     finally:
         f.close()
-
     return targets
 
 
@@ -139,6 +137,15 @@ def listar_para_converter_modo_bd(
         return conn.execute(q).fetchall()
 
 
+def _text_len_from_meta(meta: dict[str, Any]) -> int:
+    if isinstance(meta.get("text_len"), int):
+        return int(meta["text_len"])
+    text = meta.get("text") or ""
+    if isinstance(text, str):
+        return len(text.strip())
+    return 0
+
+
 def run_convert(
     *,
     db_path: Path | None = None,
@@ -148,11 +155,8 @@ def run_convert(
     from_latest_report: bool = False,
     from_report: Path | None = None,
     report_delimiter: str = ";",
+    min_text_len: int = 50,
 ) -> ConvertResult:
-    """
-    Função reutilizável (API/CLI) para converter diplomas.
-    Não imprime; devolve métricas estruturadas.
-    """
     init_db(db_path=db_path)
     _migrar_schema_conversao(db_path=db_path)
 
@@ -205,19 +209,29 @@ def run_convert(
                 raise ValueError("url_detalhe vazio/NULL na BD")
 
             meta = converter(url_detalhe=url_detalhe, url_pdf_direto=url_pdf, out_dir=out_dir)
-            err = meta.get("pdf_extract_error") or meta.get("conv_error")
+
+            tlen = _text_len_from_meta(meta)
+            err = meta.get("conv_error") or meta.get("pdf_extract_error")
+
+            ok = tlen >= int(min_text_len)
+            if ok:
+                db_err = None
+                ok_count += 1
+            else:
+                db_err = (str(err)[:2000] if err else f"Texto extraído demasiado curto ({tlen} chars)")[:2000]
+                err_count += 1
 
             marcar_resultado(
                 tipo,
                 numero,
                 ano,
-                ok=True,
+                ok=ok,
                 doc_id=meta.get("doc_id"),
                 meta_path=meta.get("ficheiro_meta"),
-                err=err,
+                err=db_err,
                 db_path=db_path,
             )
-            ok_count += 1
+
         except Exception as e:
             marcar_resultado(
                 tipo,
@@ -256,6 +270,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--reprocess", action="store_true")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--report-delimiter", default=";")
+    ap.add_argument(
+        "--min-text-len",
+        type=int,
+        default=50,
+        help="Comprimento mínimo do texto para considerar conversão OK.",
+    )
 
     args = ap.parse_args(argv)
 
@@ -277,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             from_latest_report=args.from_latest_report,
             from_report=Path(args.from_report) if args.from_report else None,
             report_delimiter=args.report_delimiter,
+            min_text_len=args.min_text_len,
         )
 
         print(f"📥 Para converter: {res.processed} (only_missing={only_missing})")

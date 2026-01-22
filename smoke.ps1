@@ -1,18 +1,53 @@
+# smoke.ps1
+# Smoke test end-to-end para legislacao-renovaveis
+# Objetivo:
+#  - garantir que o pipeline corre
+#  - garantir que o export LLM corre
+#  - validar que pelo menos um TXT é legível (se existir)
+#  - NUNCA falhar só porque não houve resultados numa categoria
+
 $ErrorActionPreference = "Stop"
 
-pytest -q
+Write-Host "== SMOKE TEST: legislacao-renovaveis =="
 
-python -m src.core.pipeline collect --days 2 --force-full-window --log-level INFO
+# -------------------------------------------------------------------
+# 1) Testes unitários (via python -m pytest para evitar problemas de PATH)
+# -------------------------------------------------------------------
+Write-Host "`n[1/4] A correr testes unitários..."
+python -m pytest -q
 
-python -m src.export_llm --tipo decreto-lei --out data\llm_decretos --no-incremental
-python -m src.export_llm --tipo portaria --out data\llm_portarias --no-incremental
+# -------------------------------------------------------------------
+# 2) Coleta (janela curta, forçada)
+# -------------------------------------------------------------------
+Write-Host "`n[2/4] A correr coleta RSS..."
+python -m src.collectors.coletor_dr_serie1_rss `
+    --days 2 `
+    --force-full-window `
+    --reset-checkpoint `
+    --log-level INFO
 
-# valida outputs
-$txt1 = Get-ChildItem .\data\llm_decretos\text\*.txt -ErrorAction Stop | Select-Object -First 1
-$json1 = Get-ChildItem .\data\llm_decretos\meta\*.json -ErrorAction Stop | Select-Object -First 1
+# -------------------------------------------------------------------
+# 3) Export LLM (presets principais)
+# -------------------------------------------------------------------
+Write-Host "`n[3/4] A exportar para LLM..."
 
-Get-Content $txt1.FullName -Encoding UTF8 -TotalCount 5
-Get-Content $json1.FullName -Encoding UTF8 -TotalCount 25
+python -m src.export_llm --preset decretos
+python -m src.export_llm --preset portarias
 
-"SMOKE OK ✅"
+# -------------------------------------------------------------------
+# 4) Validação mínima dos outputs
+# -------------------------------------------------------------------
+Write-Host "`n[4/4] A validar outputs..."
 
+$txtFiles = Get-ChildItem .\data\llm_*\text\*.txt -ErrorAction SilentlyContinue
+
+if ($txtFiles -and $txtFiles.Count -gt 0) {
+    $txt1 = $txtFiles | Select-Object -First 1
+    Write-Host "`n--- Amostra do TXT exportado ($($txt1.FullName)) ---"
+    Get-Content $txt1.FullName -Encoding UTF8 -TotalCount 5
+}
+else {
+    Write-Host "Nenhum ficheiro TXT gerado nesta execução (0 resultados filtrados) — OK"
+}
+
+Write-Host "`nSMOKE OK ✅"

@@ -43,6 +43,19 @@ Notas:
 - Por omissão o output vai para `data/llm`
 - O export separa texto **raw** vs **norm** (normalizado)
 
+Exemplos (E4 — filtro renováveis):
+```powershell
+# preset renováveis (por defeito: match em titulo+sumario; usa data/keywords_renovaveis.txt)
+python -m src.export_llm --preset renovaveis --out data\llm_renovaveis
+
+# incluir também o texto completo (se existir)
+python -m src.export_llm --preset renovaveis --match-fields all --out data\llm_renovaveis_all
+
+# usar keywords custom
+python -m src.export_llm --keywords-file data\keywords_renovaveis.txt --match-fields titulo+sumario --out data\llm_custom
+```
+
+
 ### 3) Consultar a BD (CLI)
 
 ```powershell

@@ -1,24 +1,98 @@
 {
-  "renovaveis_portarias": {
-    "days": 14,
+  "renovaveis": {
+    "days": 30,
     "types": [
-      "portaria"
+      "decreto-lei",
+      "lei",
+      "portaria",
+      "despacho",
+      "resolucao-conselho-ministros",
+      "resolucao-assembleia-republica",
+      "decreto-presidente-republica",
+      "declaracao-retificacao",
+      "declaracao"
     ],
+    "exclude_types": [],
+    "strict_types": false,
     "no_keywords": false,
-    "pdf_fallback_pages": 8
+    "pdf_fallback_pages": 8,
+    "keywords": [
+      "renovável",
+      "renováveis",
+      "energia",
+      "elétric",
+      "eletric",
+      "sistema elétrico",
+      "autoconsumo",
+      "UPAC",
+      "comunidade de energia",
+      "CER",
+      "armazenamento",
+      "bateria",
+      "hidrogénio",
+      "hidrogênio",
+      "biometano",
+      "biogás",
+      "solar",
+      "fotovoltaic",
+      "eólic",
+      "eolic",
+      "hídrica",
+      "hidrica",
+      "geoterm",
+      "biomassa",
+      "rede",
+      "injeção",
+      "garantia de origem",
+      "GOs",
+      "licenciamento",
+      "produção independente",
+      "PPA",
+      "mercado elétrico",
+      "eficiência energética",
+      "descarboniza"
+    ]
   },
-  "renovaveis_todos": {
-    "days": 14,
-    "types": [],
-    "no_keywords": false,
-    "pdf_fallback_pages": 8
-  },
-  "sem_keywords_portarias": {
-    "days": 14,
+  "decretos": {
+    "days": 60,
     "types": [
-      "portaria"
+      "decreto-lei",
+      "lei"
     ],
+    "exclude_types": [],
+    "strict_types": true,
     "no_keywords": true,
-    "pdf_fallback_pages": 8
+    "pdf_fallback_pages": 8,
+    "keywords": []
+  },
+  "portarias": {
+    "days": 60,
+    "types": [
+      "portaria"
+    ],
+    "exclude_types": [],
+    "strict_types": true,
+    "no_keywords": true,
+    "pdf_fallback_pages": 8,
+    "keywords": []
+  },
+  "serie1_tudo_sem_keywords": {
+    "days": 14,
+    "types": [
+      "decreto-lei",
+      "lei",
+      "portaria",
+      "despacho",
+      "resolucao-conselho-ministros",
+      "resolucao-assembleia-republica",
+      "decreto-presidente-republica",
+      "declaracao-retificacao",
+      "declaracao"
+    ],
+    "exclude_types": [],
+    "strict_types": false,
+    "no_keywords": true,
+    "pdf_fallback_pages": 8,
+    "keywords": []
   }
 }

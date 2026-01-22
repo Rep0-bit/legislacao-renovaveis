@@ -5,13 +5,93 @@ import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
 from typing import Any
 
+import requests
+from bs4 import BeautifulSoup
+
 from .core.config import get_data_dir
 from .db.db import DB_PATH
+
+# ----------------------------
+# HTML detalhe → texto (sem PDF)
+# ----------------------------
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0 Safari/537.36"
+)
+
+
+def _fetch_detalhe_text(url: str, *, timeout: int = 25) -> str | None:
+    """Extrai texto do *detalhe* do DR.
+
+    Motivo: muitos PDF/links devolvem HTML (ex.: "JavaScript is required" / landing de erro).
+    As páginas /dr/detalhe normalmente já contêm o texto integral.
+    """
+    if not url:
+        return None
+
+    try:
+        r = requests.get(
+            url,
+            headers={
+                "User-Agent": _UA,
+                "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.7",
+            },
+            timeout=timeout,
+        )
+        r.raise_for_status()
+    except Exception:
+        return None
+
+    html = r.text or ""
+    if not html:
+        return None
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for t in soup(["script", "style", "noscript"]):
+            t.decompose()
+        text = soup.get_text("\n", strip=True)
+    except Exception:
+        return None
+
+    text = unescape(text).strip()
+    if not text:
+        return None
+
+    # Corta para a secção principal quando existir
+    for start_marker in ["TEXTO", "Texto", "TEXTO INTEGRAL"]:
+        if start_marker in text:
+            text = text.split(start_marker, 1)[1].strip()
+            break
+
+    # Remove rodapés comuns
+    for end_marker in [
+        "Mapa do Site",
+        "Sitemap",
+        "Contactos",
+        "Política de Privacidade",
+        "JavaScript is required",
+        "Lamentamos, a página que acedeu não se encontra disponível.",
+    ]:
+        if end_marker in text:
+            text = text.split(end_marker, 1)[0].strip()
+
+    lines = [ln.strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+    text = "\n".join(lines).strip()
+
+    if len(text) < 200:
+        return None
+    return text
 
 
 @dataclass(frozen=True)
@@ -33,6 +113,20 @@ def _sha256_bytes(b: bytes) -> str:
 
 def _norm_tipo(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip().casefold()
+
+
+def _norm(s: Any) -> str:
+    """Normaliza texto para matching (None-safe; remove acentos; casefold; colapsa espaços)."""
+    if s is None:
+        return ""
+    s = str(s).strip()
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.casefold()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -233,9 +327,18 @@ def export_llm(
     since_id: int | None = None,
     # E2 ordering: for --continue we must process ascending to avoid skipping by LIMIT
     order: str = "desc",
+    # E4 keywords
+    keywords: list[str] | None = None,
+    match_fields: str = "all",
+    match_mode: str = "any",
 ) -> ExportSummary:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    keywords = [k for k in (keywords or []) if str(k).strip()]
+    keywords_norm = [_norm(k) for k in keywords]
+    match_fields = (match_fields or "all").strip().casefold()
+    match_mode = (match_mode or "any").strip().casefold()
     (out_dir / "meta").mkdir(parents=True, exist_ok=True)
     if write_text:
         (out_dir / "text").mkdir(parents=True, exist_ok=True)
@@ -369,6 +472,39 @@ def export_llm(
         text_clean = _clean_text_for_llm(text)
         exported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+        # E4: filtro por keywords (campos selecionados)
+        matched_keywords: list[str] = []
+        matched_in: list[str] = []
+        if keywords_norm:
+            field_map: dict[str, str] = {}
+            if match_fields in {"titulo", "all", "titulo+sumario", "sumario+titulo"}:
+                field_map["titulo"] = _norm(titulo)
+            if match_fields in {"sumario", "all", "titulo+sumario", "sumario+titulo"}:
+                field_map["sumario"] = _norm(sumario)
+            if match_fields in {"text", "all"}:
+                field_map["text"] = _norm(text_clean)
+
+            # Guard: if user chose text-only but we have no text_clean, still works (empty string)
+            hits_per_kw: dict[str, list[str]] = {}
+            for kw_raw, kw in zip(keywords, keywords_norm, strict=False):
+                if not kw:
+                    continue
+                hit_fields = [fname for fname, ftxt in field_map.items() if kw in ftxt]
+                if hit_fields:
+                    hits_per_kw[kw_raw] = hit_fields
+
+            if match_mode == "all":
+                if len(hits_per_kw) != len(keywords_norm):
+                    skipped += 1
+                    continue
+            else:  # any
+                if not hits_per_kw:
+                    skipped += 1
+                    continue
+
+            matched_keywords = sorted(hits_per_kw.keys())
+            matched_in = sorted({f for fs in hits_per_kw.values() for f in fs})
+
         meta: dict[str, Any] = {
             "id": rid,
             "tipo": tipo,
@@ -388,6 +524,8 @@ def export_llm(
             "sumario": sumario,
             "exported_at": exported_at,
             "text_sha256": _sha256_bytes(text_clean.encode("utf-8")),
+            "matched_keywords": matched_keywords,
+            "matched_in": matched_in,
             "text_len": len(text_clean),
         }
 
@@ -416,7 +554,7 @@ def export_llm(
 # CLI
 # -----------------------------
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Export diplomas to LLM-ready JSON + TXT")
+    ap = argparse.ArgumentParser(description="Export diplomas to LLM-ready JSON + TXT", allow_abbrev=False)
     ap.add_argument("--out", default="", help="Output dir. Default: <data_dir>/llm")
     ap.add_argument(
         "--preset",
@@ -433,6 +571,27 @@ def main() -> None:
         action="append",
         default=[],
         help="Filter by tipo (case-insensitive). Repeatable: --tipo portaria --tipo 'Resolução ...'",
+    )
+
+    # E4 keywords
+    ap.add_argument(
+        "--keywords",
+        nargs="*",
+        default=[],
+        help="Keywords (separadas por espaço; também aceita vírgulas). Ex: --keywords renováveis energia,solar",
+    )
+    ap.add_argument("--keywords-file", default="", help="Path para ficheiro de keywords (1 por linha).")
+    ap.add_argument(
+        "--match-fields",
+        choices=["titulo", "sumario", "text", "all", "titulo+sumario"],
+        default="",
+        help="Campos para matching de keywords (default: all; preset renovaveis: titulo+sumario).",
+    )
+    ap.add_argument(
+        "--match-mode",
+        choices=["any", "all"],
+        default="any",
+        help="Modo de matching (any=qualquer keyword; all=todas).",
     )
     ap.add_argument("--no-text", action="store_true", help="Write only JSON meta (no TXT files).")
     ap.add_argument(
@@ -472,7 +631,7 @@ def main() -> None:
 
         # Nota: preset renovaveis prepara o state; o filtro por keywords/where entra no E4.
         if preset == "renovaveis" and not str(args.where or "").strip():
-            print("ℹ️ preset=renovaveis: state preparado; filtro temático será adicionado no E4")
+            print("")
 
     tipos = list(args.tipo or [])
     state_key = _make_state_key(str(args.state), tipos)
@@ -506,6 +665,60 @@ def main() -> None:
         save_state = True
         print(f"📤 Continue state={args.state} key={state_key} since-id={since_id}")
 
+    # E4: preparar keywords
+    def _clean_kw(raw: str) -> str | None:
+        line = (raw or "").strip()
+        if not line or line.startswith("#"):
+            return None
+        line = line.lstrip("\ufeff")
+        # tolera linhas com aspas/vírgulas (copiado de listas)
+        if line.endswith(",") or line.endswith(";"):
+            line = line[:-1].rstrip()
+        if (line.startswith('"') and line.endswith('"')) or (line.startswith("'") and line.endswith("'")):
+            line = line[1:-1].strip()
+        line = " ".join(line.split())
+        return line or None
+
+    keywords: list[str] = []
+    for token in list(getattr(args, "keywords", []) or []):
+        # permite "--keywords a,b c" → ["a", "b", "c"]
+        for part in re.split(r"[;,]", str(token)):
+            cleaned = _clean_kw(part)
+            if cleaned:
+                keywords.append(cleaned)
+
+    kw_file = str(getattr(args, "keywords_file", "") or "").strip()
+    mf = str(getattr(args, "match_fields", "") or "").strip()
+    mm = str(getattr(args, "match_mode", "any") or "any").strip()
+
+    if preset == "renovaveis" and not kw_file and not keywords:
+        kw_file = "data/keywords_renovaveis.txt"
+    if preset == "renovaveis" and not mf:
+        mf = "titulo+sumario"
+
+    if kw_file:
+        p = Path(kw_file)
+        if p.exists():
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # tolera linhas com aspas/vírgulas (copiado de listas)
+                line = line.lstrip("\ufeff")
+                if line.endswith(",") or line.endswith(";"):
+                    line = line[:-1].rstrip()
+                if (line.startswith('"') and line.endswith('"')) or (
+                    line.startswith("'") and line.endswith("'")
+                ):
+                    line = line[1:-1].strip()
+                line = " ".join(line.split())
+                if line:
+                    keywords.append(line)
+    if keywords:
+        print(f"ℹ️ E4 keywords: {len(keywords)} carregadas da CLI")
+    if kw_file:
+        print(f"ℹ️ E4 keywords: {len(keywords)} carregadas de {kw_file}")
+
     summary = export_llm(
         out_dir=out_dir,
         limit=int(args.limit),
@@ -516,6 +729,9 @@ def main() -> None:
         since=since,
         since_id=since_id,
         order=order,
+        keywords=keywords,
+        match_fields=mf or "all",
+        match_mode=mm or "any",
     )
 
     if save_state and summary.last_id is not None:
