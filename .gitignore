@@ -58,8 +58,9 @@ dist/
 *.spec
 
 
-# scripts temporários
+# scripts temporï¿½rios
 fix_*.py
 src/archive/
 *.bak
 
+!tools/fix_url_detalhe.py
