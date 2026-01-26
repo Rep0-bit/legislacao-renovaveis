@@ -92,3 +92,16 @@ Os artefactos ficam em `dist/`.
 ## Launcher (Windows)
 
 Executa `run_coletor.bat` (menu/atalhos para correr o coletor).
+
+## Nota sobre encoding (Windows PowerShell)
+
+Os ficheiros de texto gerados pela aplicação são gravados em **UTF-8 (sem BOM)**.
+
+No **Windows PowerShell 5.1**, o comando `Get-Content` pode interpretar UTF-8
+como Windows-1252, apresentando caracteres como `Ã§`, `Ã£`, `Âº`, etc.
+Isto é apenas um problema de visualização — os ficheiros estão corretos.
+
+Para visualizar corretamente, usar:
+
+```powershell
+Get-Content ficheiro.txt -Encoding utf8
