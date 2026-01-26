@@ -205,10 +205,9 @@ def run_convert(
             continue
 
         try:
-            if not url_detalhe:
-                raise ValueError("url_detalhe vazio/NULL na BD")
-
-            meta = converter(url_detalhe=url_detalhe, url_pdf_direto=url_pdf, out_dir=out_dir)
+            # ✅ Alguns registos importados manualmente podem não ter url_detalhe (ex.: PDFs externos).
+            # Nesses casos, a conversão tenta usar diretamente o url_pdf.
+            meta = converter(url_detalhe=url_detalhe or None, url_pdf_direto=url_pdf, out_dir=out_dir)
 
             tlen = _text_len_from_meta(meta)
             err = meta.get("conv_error") or meta.get("pdf_extract_error")

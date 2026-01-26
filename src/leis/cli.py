@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from . import api
+from .import_csv import import_csv_to_db
 
 
 def _parse_csv_list(s: str) -> list[str]:
@@ -25,10 +27,10 @@ def main() -> None:
     )
     p_list.add_argument("--tipo-not-in", default="", help="CSV de tipo_slug a excluir")
     p_list.add_argument("--ano", type=int, default=0, help="Ano (ex.: 2026)")
-    p_list.add_argument("--from", dest="date_from", default="", help="Data publicação >= YYYY-MM-DD")
-    p_list.add_argument("--to", dest="date_to", default="", help="Data publicação <= YYYY-MM-DD")
+    p_list.add_argument("--from", dest="date_from", default="", help="Data publicaÃ§Ã£o >= YYYY-MM-DD")
+    p_list.add_argument("--to", dest="date_to", default="", help="Data publicaÃ§Ã£o <= YYYY-MM-DD")
     p_list.add_argument("--q", default="", help="Pesquisa em titulo/sumario/numero/numero_display (LIKE)")
-    p_list.add_argument("--limit", type=int, default=20, help="Máximo de linhas (1..500)")
+    p_list.add_argument("--limit", type=int, default=20, help="MÃ¡ximo de linhas (1..500)")
     p_list.add_argument("--offset", type=int, default=0, help="Offset")
     p_list.add_argument(
         "--order-by",
@@ -41,25 +43,25 @@ def main() -> None:
             "id_desc",
             "id_asc",
         ],
-        help="Ordenação",
+        help="OrdenaÃ§Ã£o",
     )
 
     p_stats = sub.add_parser("stats-tipo", help="Contagens por tipo_slug.")
-    p_stats.add_argument("--from", dest="date_from", default="", help="Data publicação >= YYYY-MM-DD")
-    p_stats.add_argument("--to", dest="date_to", default="", help="Data publicação <= YYYY-MM-DD")
+    p_stats.add_argument("--from", dest="date_from", default="", help="Data publicaÃ§Ã£o >= YYYY-MM-DD")
+    p_stats.add_argument("--to", dest="date_to", default="", help="Data publicaÃ§Ã£o <= YYYY-MM-DD")
     p_stats.add_argument("--q", default="", help="Pesquisa em titulo/sumario/numero/numero_display (LIKE)")
     p_stats.add_argument("--top", type=int, default=50, help="Top N (1..500)")
 
     p_export = sub.add_parser("export", help="Exporta diplomas para CSV.")
-    p_export.add_argument("--out", required=True, help="Caminho do CSV de saída")
+    p_export.add_argument("--out", required=True, help="Caminho do CSV de saÃ­da")
     p_export.add_argument("--tipo", default="", help="tipo_slug exato (ex.: portaria)")
     p_export.add_argument("--tipo-in", default="", help="CSV de tipo_slug a incluir")
     p_export.add_argument("--tipo-not-in", default="", help="CSV de tipo_slug a excluir")
     p_export.add_argument("--ano", type=int, default=0, help="Ano (ex.: 2026)")
-    p_export.add_argument("--from", dest="date_from", default="", help="Data publicação >= YYYY-MM-DD")
-    p_export.add_argument("--to", dest="date_to", default="", help="Data publicação <= YYYY-MM-DD")
+    p_export.add_argument("--from", dest="date_from", default="", help="Data publicaÃ§Ã£o >= YYYY-MM-DD")
+    p_export.add_argument("--to", dest="date_to", default="", help="Data publicaÃ§Ã£o <= YYYY-MM-DD")
     p_export.add_argument("--q", default="", help="Pesquisa em titulo/sumario/numero/numero_display (LIKE)")
-    p_export.add_argument("--limit", type=int, default=500, help="Máximo de linhas (1..500)")
+    p_export.add_argument("--limit", type=int, default=500, help="MÃ¡ximo de linhas (1..500)")
     p_export.add_argument("--offset", type=int, default=0, help="Offset")
     p_export.add_argument(
         "--order-by",
@@ -72,9 +74,23 @@ def main() -> None:
             "id_desc",
             "id_asc",
         ],
-        help="Ordenação",
+        help="OrdenaÃ§Ã£o",
     )
     p_export.add_argument("--delimiter", default=";", help="Separador CSV (default ; )")
+
+    p_import = sub.add_parser("import", help="Importa diplomas para a BD a partir de CSV (manual).")
+    p_import.add_argument("--csv", required=True, help="Caminho para o CSV de import.")
+    p_import.add_argument(
+        "--mode",
+        default="upsert",
+        choices=["upsert", "insert"],
+        help="upsert (default) ou insert (não atualiza existentes).",
+    )
+    p_import.add_argument(
+        "--reset-conversion",
+        action="store_true",
+        help="Limpa conv_ok/conv_error/conv_meta_path para forçar reconversão dos registos importados/atualizados.",
+    )
 
     args = ap.parse_args()
     db_path = args.db or None
@@ -102,7 +118,7 @@ def main() -> None:
         )
 
         if not rows:
-            print("ℹ️ Sem resultados.")
+            print("â„¹ï¸ Sem resultados.")
             return
 
         for r in rows:
@@ -119,7 +135,7 @@ def main() -> None:
             top=args.top,
         )
         for r in rows:
-            print(f"{r.get('tipo_slug', '') or '—'}\t{r.get('n', 0)}")
+            print(f"{r.get('tipo_slug', '') or 'â€”'}\t{r.get('n', 0)}")
 
     elif args.cmd == "export":
         order_by = _default_order(bool(args.tipo), args.order_by)
@@ -139,7 +155,21 @@ def main() -> None:
             offset=args.offset,
             order_by=order_by,
         )
-        print(f"✅ Exportado: {outp}")
+        print(f"âœ… Exportado: {outp}")
+
+    elif args.cmd == "import":
+        s = import_csv_to_db(
+            csv_path=Path(args.csv),
+            db_path=Path(db_path) if db_path else None,
+            mode=args.mode,
+            reset_conversion=bool(args.reset_conversion),
+        )
+        print(
+            "âœ… Import CSV OK: "
+            f"total={s.rows_total} inserted={s.inserted} updated={s.updated} "
+            f"skipped={s.skipped} errors={s.errors} report={s.report_path}"
+        )
+
     else:
         raise SystemExit(f"Comando desconhecido: {args.cmd}")
 

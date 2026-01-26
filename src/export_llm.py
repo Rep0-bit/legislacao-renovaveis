@@ -190,18 +190,24 @@ def _fix_mojibake(s: str | None) -> str | None:
     return best
 
 
-def _extract_text_from_conv_meta(meta_path: str | None) -> str | None:
+def _extract_text_from_conv_meta(meta_path: str | None, *, data_dir: Path | None = None) -> str | None:
+    """Locate converted text using the conv_meta JSON.
+
+    Supports both older keys (txt_path/text_path/...) and current PT keys (ficheiro_texto/...).
+    """
     if not meta_path:
         return None
     try:
-        p = Path(meta_path)
-        if not p.exists():
+        mp = Path(meta_path)
+        if not mp.exists():
             return None
-        meta = json.loads(p.read_text(encoding="utf-8"))
+        meta = json.loads(mp.read_text(encoding="utf-8"))
     except Exception:
         return None
 
-    for key in (
+    # 1) file path keys (preferred)
+    path_keys = (
+        # legacy/english-ish
         "txt_path",
         "text_path",
         "text_file",
@@ -209,44 +215,95 @@ def _extract_text_from_conv_meta(meta_path: str | None) -> str | None:
         "out_txt",
         "path_txt",
         "file_txt",
-    ):
+        # current PT keys used by conversao.py
+        "ficheiro_texto",
+        "ficheiro_texto_limpo",
+        "ficheiro_txt",
+        "ficheiro_text",
+    )
+    for key in path_keys:
         v = meta.get(key)
         if isinstance(v, str) and v.strip():
             tp = Path(v)
-            if not tp.is_absolute():
-                tp = (p.parent / tp).resolve()
-            if tp.exists():
-                try:
-                    return tp.read_text(encoding="utf-8")
-                except Exception:
-                    try:
-                        return tp.read_text(encoding="utf-8", errors="ignore")
-                    except Exception:
-                        return None
 
+            # Resolve relative paths:
+            # - relative to meta dir
+            # - relative to project root (cwd)
+            # - relative to data_dir if provided
+            candidates: list[Path] = []
+            if tp.is_absolute():
+                candidates.append(tp)
+            else:
+                candidates.append((mp.parent / tp).resolve())
+                candidates.append((Path.cwd() / tp).resolve())
+                if data_dir is not None:
+                    candidates.append((data_dir / tp).resolve())
+
+            for cand in candidates:
+                if cand.exists():
+                    try:
+                        return cand.read_text(encoding="utf-8")
+                    except Exception:
+                        try:
+                            return cand.read_text(encoding="utf-8", errors="ignore")
+                        except Exception:
+                            continue
+
+    # 2) inline text keys
     for key in ("texto_limpo", "texto", "text", "conteudo"):
         v = meta.get(key)
         if isinstance(v, str) and v.strip():
             return v
+
+    # 3) if meta has doc_id, try resolve via data/text
+    doc_id = meta.get("doc_id")
+    if isinstance(doc_id, str) and doc_id.strip() and data_dir is not None:
+        return _extract_text_from_doc_id(doc_id.strip(), data_dir)
+
     return None
 
 
 def _extract_text_from_doc_id(doc_id: str | None, data_dir: Path) -> str | None:
+    """Locate converted text by doc_id inside the data directory."""
     if not doc_id:
         return None
     doc_id = str(doc_id).strip()
     if not doc_id:
         return None
 
-    candidates = [
-        data_dir / "convert" / f"{doc_id}.txt",
-        data_dir / "convert" / f"{doc_id}.text",
-        data_dir / "convert" / "txt" / f"{doc_id}.txt",
-        data_dir / "convert" / doc_id / "text.txt",
-        data_dir / "convert" / doc_id / "output.txt",
-        data_dir / "convert" / doc_id / "clean.txt",
-    ]
+    candidates: list[Path] = []
+
+    # Current layout
+    text_dir = data_dir / "text"
+    if text_dir.exists():
+        # Prefer explicit suffix order
+        for suffix in ("__html.txt", "__pdf.txt", "__pdf_direct.txt"):
+            candidates.append(text_dir / f"{doc_id}{suffix}")
+
+        # Any other txt that starts with doc_id (e.g. doc_id__*.txt)
+        candidates.extend(sorted(text_dir.glob(f"{doc_id}__*.txt")))
+
+        # Fallbacks
+        candidates.append(text_dir / f"{doc_id}.txt")
+        candidates.extend(sorted(text_dir.glob(f"{doc_id}*.txt")))
+
+    # Older layout fallbacks
+    candidates.extend(
+        [
+            data_dir / "convert" / f"{doc_id}.txt",
+            data_dir / "convert" / f"{doc_id}.text",
+            data_dir / "convert" / "txt" / f"{doc_id}.txt",
+            data_dir / "convert" / doc_id / "text.txt",
+            data_dir / "convert" / doc_id / "output.txt",
+            data_dir / "convert" / doc_id / "clean.txt",
+        ]
+    )
+
+    seen: set[Path] = set()
     for p in candidates:
+        if p in seen:
+            continue
+        seen.add(p)
         if p.exists():
             try:
                 return p.read_text(encoding="utf-8")
@@ -256,6 +313,22 @@ def _extract_text_from_doc_id(doc_id: str | None, data_dir: Path) -> str | None:
                 except Exception:
                     continue
     return None
+
+
+def _fix_mojibake(s: str) -> str:
+    """Best-effort fix for common UTF-8->Latin1 mojibake (Ã¡, Âº, etc.)."""
+    if not s:
+        return s
+    if ("Ã" not in s) and ("Â" not in s):
+        return s
+    try:
+        fixed = s.encode("latin-1", errors="ignore").decode("utf-8", errors="ignore")
+        # keep only if it got better
+        if ("Ã" in fixed) or ("Â" in fixed):
+            return s
+        return fixed
+    except Exception:
+        return s
 
 
 def _clean_text_for_llm(text: str) -> str:
@@ -469,7 +542,7 @@ def export_llm(
             skipped += 1
             continue
 
-        text_clean = _clean_text_for_llm(text)
+        text_clean = _clean_text_for_llm(_fix_mojibake(text))
         exported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
         # E4: filtro por keywords (campos selecionados)
