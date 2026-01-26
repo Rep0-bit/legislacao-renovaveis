@@ -1,67 +1,73 @@
+# =========================
 # Python
+# =========================
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.egg-info/
 
+# =========================
 # Virtual env
+# =========================
 .venv/
 venv/
 
-# Dados gerados
+# =========================
+# Dados gerados (NUNCA versionar)
+# =========================
 data/
-data/**
 
-# Python cache
-__pycache__/
-**/__pycache__/
-*.pyc
-
-
-# Arquivo
-src/collectors/old versions/
-
-
-# DBs
+# =========================
+# Bases de dados
+# =========================
 *.db
 *.sqlite
 *.sqlite3
 
-# Temporários
-tmp_*.py
+# =========================
+# Logs / temporários
+# =========================
 *.log
+logs/
+tmp_*.py
+*.bak
 
-# IDEs
+# =========================
+# IDEs / SO
+# =========================
 .vscode/
 .idea/
-
-# Outros
 .DS_Store
 
+# =========================
 # Caches / tooling
+# =========================
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
 .coverage
 coverage.xml
 
+# =========================
 # Build artifacts
+# =========================
 build/
 dist/
-
-# Ad-hoc helper scripts (mantidos fora do repo)
-#scripts/
-
-/build/
-/dist/
 *.spec
 
-
-# scripts tempor�rios
+# =========================
+# Scripts temporários
+# =========================
 fix_*.py
-src/archive/
-*.bak
 
-!tools/fix_url_detalhe.py
+# permitir scripts oficiais
+!tools/fix_*.py
+
+# =========================
+# Arquivo / legacy
+# =========================
+src/archive/
+
+# Config legacy/local
 config/
