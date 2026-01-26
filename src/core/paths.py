@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -49,11 +50,17 @@ def get_data_dir() -> Path:
 
     Priority:
     1) LEGREN_DATA_DIR env var
-    2) <repo_root>/data
+    2) frozen exe -> per-user data dir
+    3) <repo_root>/data
     """
     env = (os.getenv("LEGREN_DATA_DIR", "") or "").strip()
     if env:
         return Path(env).expanduser().resolve()
+
+    # PyInstaller / frozen executable: use per-user app data
+    if getattr(sys, "frozen", False):
+        return get_user_data_dir().resolve()
+
     return (get_repo_root() / "data").resolve()
 
 
