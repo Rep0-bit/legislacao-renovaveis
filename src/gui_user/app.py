@@ -102,6 +102,8 @@ class App(tk.Tk):
 
         self.status = tk.StringVar(value="Pronto.")
         self.window_days = tk.IntVar(value=DEFAULT_WINDOW)
+        self.only_converted = tk.BooleanVar(value=True)
+        self.min_chars = tk.StringVar(value="2000")
 
         # ── Header ─────────────────────────────────────────────
         header = ttk.Frame(self, padding=12)
@@ -147,6 +149,12 @@ class App(tk.Tk):
         self.btn_import_csv.pack(side="left", padx=6)
 
         ttk.Button(actions, text="Abrir resultados", command=self.on_open_results).pack(side="left", padx=6)
+
+        ttk.Checkbutton(actions, text="Só exportar convertidos", variable=self.only_converted).pack(
+            side="left", padx=(12, 6)
+        )
+        ttk.Label(actions, text="mín chars:").pack(side="left", padx=(6, 2))
+        ttk.Entry(actions, textvariable=self.min_chars, width=6).pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Limpar log", command=self.on_clear).pack(side="right", padx=6)
 
         # ── Área de log ────────────────────────────────────────
@@ -277,6 +285,7 @@ class App(tk.Tk):
             self._set_busy(True, "A gerar pacote para LLM…")
             try:
                 out_dir = get_data_dir() / "llm_renovaveis"
+                preset = "renovaveis"
                 summary = export_llm_fn(
                     out_dir=out_dir,
                     limit=500,
@@ -286,6 +295,9 @@ class App(tk.Tk):
                     match_mode="any",
                     write_text=True,
                     incremental=DEFAULT_INCREMENTAL,
+                    only_converted=bool(self.only_converted.get()),
+                    min_chars=int(self.min_chars.get() or 2000),
+                    require_keywords=(preset == "renovaveis"),
                 )
                 logging.getLogger(__name__).info(
                     "Export concluído: exported=%s skipped=%s out=%s",

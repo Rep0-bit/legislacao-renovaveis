@@ -395,6 +395,9 @@ def export_llm(
     tipos: list[str] | None = None,
     write_text: bool = True,
     incremental: bool = True,
+    only_converted: bool = False,
+    min_chars: int = 2000,
+    require_keywords: bool = False,
     # E1 filters
     since: str | None = None,
     since_id: int | None = None,
@@ -410,6 +413,15 @@ def export_llm(
 
     keywords = [k for k in (keywords or []) if str(k).strip()]
     keywords_norm = [_norm(k) for k in keywords]
+    if require_keywords and (not keywords_norm):
+        # Modo estrito: sem keywords não há export temático.
+        (out_dir / "meta").mkdir(parents=True, exist_ok=True)
+        if write_text:
+            (out_dir / "text").mkdir(parents=True, exist_ok=True)
+        report = out_dir / "incompletos.csv"
+        report.write_text("motivo\nno_keywords_configured\n", encoding="utf-8")
+        return ExportSummary(exported=0, skipped=0, out_dir=out_dir, last_id=None)
+
     match_fields = (match_fields or "all").strip().casefold()
     match_mode = (match_mode or "any").strip().casefold()
     (out_dir / "meta").mkdir(parents=True, exist_ok=True)
@@ -451,7 +463,8 @@ def export_llm(
 
     if tipos:
         wanted = [_norm_tipo(t) for t in tipos]
-        clauses.append("lower(tipo) IN (" + ", ".join(["?"] * len(wanted)) + ")")
+        placeholders = ", ".join(["?"] * len(wanted))
+        clauses.append(f"lower(tipo) IN ({placeholders})")
         params.extend(wanted)
 
     if where_sql.strip():
@@ -519,16 +532,25 @@ def export_llm(
             sumario = (_fix_mojibake(sumario_norm) or sumario_norm or sumario_raw or "").strip()
 
         text: str | None = None
+        text_source = "none"
+
         if text_col:
             v = _row_get(r, text_col)
             if isinstance(v, str) and v.strip():
                 text = v
+                text_source = "db_text"
 
         if not text:
-            text = _extract_text_from_conv_meta(_row_get(r, "conv_meta_path"))
+            t2 = _extract_text_from_conv_meta(_row_get(r, "conv_meta_path"))
+            if t2:
+                text = t2
+                text_source = "conv_meta"
 
         if not text:
-            text = _extract_text_from_doc_id(_row_get(r, "conv_doc_id"), data_dir)
+            t3 = _extract_text_from_doc_id(_row_get(r, "conv_doc_id"), data_dir)
+            if t3:
+                text = t3
+                text_source = "doc_id"
 
         if not text:
             parts = []
@@ -537,12 +559,57 @@ def export_llm(
             if sumario:
                 parts.append(sumario)
             text = "\n\n".join(parts).strip() or None
+            if text:
+                text_source = "fallback_titulo_sumario"
 
         if text is None:
             skipped += 1
+            if only_converted:
+                rep = out_dir / "incompletos.csv"
+                if not rep.exists():
+                    rep.write_text(
+                        "id,tipo,numero,ano,motivo,conv_ok,conv_doc_id,text_source,text_chars,url_detalhe,url_pdf\n",
+                        encoding="utf-8",
+                    )
+                rid = int(_row_get(r, "id") or 0)
+                tipo = _row_get(r, "tipo") or ""
+                numero = _row_get(r, "numero") or ""
+                ano = _row_get(r, "ano") or ""
+                conv_ok = _row_get(r, "conv_ok")
+                conv_doc_id = (_row_get(r, "conv_doc_id") or "").strip()
+                with rep.open("a", encoding="utf-8") as f:
+                    f.write(
+                        f"{rid},{tipo},{numero},{ano},sem_texto,{conv_ok},{conv_doc_id},none,0,{_row_get(r,'url_detalhe')},{_row_get(r,'url_pdf')}\n"
+                    )
             continue
 
         text_clean = _clean_text_for_llm(_fix_mojibake(text))
+        text_chars = len(text_clean)
+
+        if only_converted:
+            conv_ok = _row_get(r, "conv_ok")
+            conv_doc_id = (_row_get(r, "conv_doc_id") or "").strip()
+            ok_conv = (str(conv_ok or "") == "1") and bool(conv_doc_id)
+            ok_text = (not text_source.startswith("fallback")) and (text_chars >= int(min_chars))
+            if (not ok_conv) or (not ok_text):
+                skipped += 1
+                rep = out_dir / "incompletos.csv"
+                if not rep.exists():
+                    rep.write_text(
+                        "id,tipo,numero,ano,motivo,conv_ok,conv_doc_id,text_source,text_chars,url_detalhe,url_pdf\n",
+                        encoding="utf-8",
+                    )
+                if not ok_conv:
+                    motivo = "sem_conversao"
+                elif text_source.startswith("fallback"):
+                    motivo = "fallback_titulo_sumario"
+                else:
+                    motivo = "texto_curto"
+                with rep.open("a", encoding="utf-8") as f:
+                    f.write(
+                        f"{rid},{tipo},{numero},{ano},{motivo},{conv_ok},{conv_doc_id},{text_source},{text_chars},{_row_get(r,'url_detalhe')},{_row_get(r,'url_pdf')}\n"
+                    )
+                continue
         exported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
         # E4: filtro por keywords (campos selecionados)
@@ -596,6 +663,8 @@ def export_llm(
             "titulo": titulo,
             "sumario": sumario,
             "exported_at": exported_at,
+            "text_source": text_source,
+            "text_chars": text_chars,
             "text_sha256": _sha256_bytes(text_clean.encode("utf-8")),
             "matched_keywords": matched_keywords,
             "matched_in": matched_in,
@@ -667,6 +736,22 @@ def main() -> None:
         help="Modo de matching (any=qualquer keyword; all=todas).",
     )
     ap.add_argument("--no-text", action="store_true", help="Write only JSON meta (no TXT files).")
+    ap.add_argument(
+        "--only-converted",
+        action="store_true",
+        help="Modo estrito: exporta apenas diplomas com conversão OK (conv_ok=1) e texto convertido suficientemente grande. Desativa fallback título/sumário.",
+    )
+    ap.add_argument(
+        "--min-chars",
+        type=int,
+        default=2000,
+        help="Tamanho mínimo do texto convertido para considerar 'completo' (default: 2000).",
+    )
+    ap.add_argument(
+        "--require-keywords",
+        action="store_true",
+        help="Se definido e não existirem keywords, não exporta nada (útil para preset temático).",
+    )
     ap.add_argument(
         "--no-incremental",
         action="store_true",

@@ -5,6 +5,7 @@ import csv
 import logging
 import os
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -327,6 +328,20 @@ def _slugify_ascii_kebab(s: str) -> str:
     return s
 
 
+def _norm_text(s: str) -> str:
+    s = (s or "").strip().casefold()
+    if not s:
+        return ""
+    s = s.replace("ª", "a").replace("º", "o")
+    try:
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    except Exception:
+        pass
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
 def _normalize_upsert_result(res: Any) -> tuple[str, bool, str | None, str | None]:
     """Normaliza retorno do upsert.
 
@@ -367,8 +382,8 @@ def collect(*args, **kwargs):
     não garante sumários completos.
     """
     # positional: keywords, days
-    if args:
-        _ = args[0]  # keywords (ignored)
+    if args and isinstance(args[0], list | tuple):
+        kwargs.setdefault("keywords", list(args[0]))
         args = args[1:]
     if args and isinstance(args[0], int):
         kwargs.setdefault("days", args[0])
@@ -393,6 +408,10 @@ def _collect_impl(
     dry_run: bool = False,
     force_full_window: bool = False,
     keywords_enabled: bool = True,
+    keywords: list[str] | None = None,
+    include_types: list[str] | None = None,
+    exclude_types: list[str] | None = None,
+    strict_types: bool = False,
     report_dir: Path | None = None,
     debug: bool = False,
     rss_url: str = RSS_SERIE1_HTML,
@@ -433,6 +452,15 @@ def _collect_impl(
         pdfs_found = sum(1 for it in window if it.get("pdf_url"))
         logger.info("🔗 Links de detalhe/ELI encontrados (bruto): %s", links_found)
         logger.info("📄 Itens com PDF direto usados: %s", pdfs_found)
+
+        # filtros por tipo (opcional)
+        include_types = [t.strip().casefold() for t in (include_types or []) if str(t).strip()]
+        exclude_types = [t.strip().casefold() for t in (exclude_types or []) if str(t).strip()]
+        strict_types = bool(strict_types)
+
+        # keywords (para *marcação*, não para exclusão)
+        kw_list = [k.strip() for k in (keywords or []) if str(k).strip()]
+        kw_norm = [_norm_text(k) for k in kw_list]
 
         novos = atualizados = inalterados = manuais = processed = 0
         report_rows: list[dict[str, Any]] = []
@@ -478,10 +506,74 @@ def _collect_impl(
                 )
                 continue
 
-            # keywords (opcional)
+            # filtro por tipo (opcional). Aqui é um filtro "óbvio" (reduz ruído),
+            # mas não é temático (não depende de keywords).
+            tipo_slug_effective = (tipo2 or tipo or "").strip().casefold()
+            if exclude_types and tipo_slug_effective in exclude_types:
+                report_rows.append(
+                    {
+                        "pubDate_utc": pub_utc.isoformat() if isinstance(pub_utc, datetime) else None,
+                        "tipo": tipo,
+                        "numero": str(numero),
+                        "ano": int(ano),
+                        "titulo": title,
+                        "link": link,
+                        "pdf_url": pdf_url,
+                        "status": "skipped",
+                        "manual": False,
+                        "note": f"excluded type: {tipo_slug_effective}",
+                    }
+                )
+                continue
+            if include_types:
+                if not tipo_slug_effective:
+                    if strict_types:
+                        report_rows.append(
+                            {
+                                "pubDate_utc": pub_utc.isoformat() if isinstance(pub_utc, datetime) else None,
+                                "tipo": tipo,
+                                "numero": str(numero),
+                                "ano": int(ano),
+                                "titulo": title,
+                                "link": link,
+                                "pdf_url": pdf_url,
+                                "status": "skipped",
+                                "manual": False,
+                                "note": "missing type (strict-types=ON)",
+                            }
+                        )
+                        continue
+                elif tipo_slug_effective not in include_types:
+                    report_rows.append(
+                        {
+                            "pubDate_utc": pub_utc.isoformat() if isinstance(pub_utc, datetime) else None,
+                            "tipo": tipo,
+                            "numero": str(numero),
+                            "ano": int(ano),
+                            "titulo": title,
+                            "link": link,
+                            "pdf_url": pdf_url,
+                            "status": "skipped",
+                            "manual": False,
+                            "note": f"not in include types: {tipo_slug_effective}",
+                        }
+                    )
+                    continue
+
+            # keywords: apenas marca candidatos (NÃO rejeita)
+            candidate = 0
+            candidate_note = ""
+            if keywords_enabled and kw_norm:
+                hay = _norm_text(" ".join([title or "", it.get("description") or ""]))
+                hits = [kw_raw for kw_raw, kw in zip(kw_list, kw_norm, strict=False) if kw and (kw in hay)]
+                if hits:
+                    candidate = 1
+                    candidate_note = ", ".join(sorted(set(hits)))
+
+            # hook para futura validação via PDF (não rejeita)
             if keywords_enabled:
                 _kw_match, _kw_note = try_keyword_match_via_pdf(pdf_url=pdf_url, link=link, title=title)
-                # Por agora não rejeitamos com base no PDF aqui; o hook existe para evoluir.
+                _ = (_kw_match, _kw_note)
 
             reg: dict[str, Any] = {
                 "tipo": tipo,
@@ -494,6 +586,8 @@ def _collect_impl(
                 "url_pdf": pdf_url,
                 "tipo_slug": tipo2 or tipo,
                 "id_dr": id_dr,
+                "candidate_renovaveis": candidate,
+                "candidate_note": candidate_note,
             }
 
             if dry_run:

@@ -88,6 +88,11 @@ def init_db(db_path: Any | None = None) -> None:
         _ensure_column(conn, "diplomas", "titulo_norm", "titulo_norm TEXT")
         _ensure_column(conn, "diplomas", "sumario_norm", "sumario_norm TEXT")
 
+        # Tema / classificação (migrations leves)
+        _ensure_column(conn, "diplomas", "tema", "tema TEXT")
+        _ensure_column(conn, "diplomas", "candidate_renovaveis", "candidate_renovaveis INTEGER DEFAULT 0")
+        _ensure_column(conn, "diplomas", "candidate_note", "candidate_note TEXT")
+
         # Índices úteis
         conn.execute(
             """

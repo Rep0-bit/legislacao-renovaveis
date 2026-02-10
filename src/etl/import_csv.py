@@ -59,6 +59,22 @@ def import_csv(
 ) -> ImportStats:
     init_db()
 
+    # Auto-detetar delimitador se o ficheiro não usar o delimitador pedido.
+    # Isto evita falhas comuns quando o utilizador exporta CSV com "," em vez de ";".
+    if delimiter in (";", ","):
+        try:
+            sample = path.read_bytes()[:4096].decode("utf-8", errors="ignore")
+            first_line = sample.splitlines()[0] if sample.splitlines() else sample
+            if first_line:
+                semi = first_line.count(";")
+                comma = first_line.count(",")
+                if delimiter == ";" and comma > semi:
+                    delimiter = ","
+                elif delimiter == "," and semi > comma:
+                    delimiter = ";"
+        except Exception:
+            pass
+
     if not path.exists():
         raise FileNotFoundError(f"CSV não encontrado: {path}")
 
@@ -93,9 +109,13 @@ def import_csv(
                 "ano": int(_norm(row.get("ano"))),
             }
 
-            for k in ("titulo", "sumario", "url_detalhe", "url_pdf", "data_publicacao"):
+            for k in ("titulo", "sumario", "url_detalhe", "url_pdf", "data_publicacao", "tema"):
                 if _norm(row.get(k)):
                     reg[k] = _norm(row.get(k))
+
+            # Import manual: o utilizador está a afirmar relevância.
+            reg.setdefault("tema", "renovaveis")
+            reg.setdefault("candidate_renovaveis", 1)
 
             if dry_run:
                 tipo_s = str(reg["tipo"])

@@ -170,6 +170,9 @@ def upsert_diploma(
         "estado": reg.get("estado", "desconhecido") or "desconhecido",
         "ultima_verificacao": now,
         "hash_fonte": new_hash,
+        "tema": reg.get("tema"),
+        "candidate_renovaveis": reg.get("candidate_renovaveis"),
+        "candidate_note": reg.get("candidate_note"),
     }
 
     with get_conn(db_path) as conn:
@@ -181,14 +184,16 @@ def upsert_diploma(
                 data_publicacao, titulo, sumario, titulo_norm, sumario_norm,
                 url_detalhe, url_pdf, url_consolidado,
                 resumo_1_frase, observacoes,
-                estado, ultima_verificacao, hash_fonte
+                estado, ultima_verificacao, hash_fonte,
+                tema, candidate_renovaveis, candidate_note
             ) VALUES (
                 :id_dr,
                 :tipo, :tipo_slug, :numero, :numero_norm, :numero_display, :ano,
                 :data_publicacao, :titulo, :sumario, :titulo_norm, :sumario_norm,
                 :url_detalhe, :url_pdf, :url_consolidado,
                 :resumo_1_frase, :observacoes,
-                :estado, :ultima_verificacao, :hash_fonte
+                :estado, :ultima_verificacao, :hash_fonte,
+                :tema, :candidate_renovaveis, :candidate_note
             )
             ON CONFLICT(tipo, numero, ano) DO UPDATE SET
                 id_dr=COALESCE(NULLIF(excluded.id_dr,''), diplomas.id_dr),
@@ -213,7 +218,11 @@ def upsert_diploma(
                 estado=COALESCE(NULLIF(excluded.estado,''), diplomas.estado),
 
                 ultima_verificacao=excluded.ultima_verificacao,
-                hash_fonte=excluded.hash_fonte
+                hash_fonte=excluded.hash_fonte,
+
+                tema=COALESCE(NULLIF(excluded.tema,''), diplomas.tema),
+                candidate_renovaveis=COALESCE(excluded.candidate_renovaveis, diplomas.candidate_renovaveis),
+                candidate_note=COALESCE(NULLIF(excluded.candidate_note,''), diplomas.candidate_note)
             """,
             payload,
         )
