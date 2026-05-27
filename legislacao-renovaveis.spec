@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['main_coletor.py'],
+    ['src\\gui_user\\app.py'],
     pathex=[],
     binaries=[],
-    datas=[('src\\config\\profiles.json', 'src\\config')],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -26,7 +26,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

@@ -331,3 +331,7 @@ class App(tk.Tk):
 
 def run() -> None:
     App().mainloop()
+
+
+if __name__ == "__main__":
+    run()
