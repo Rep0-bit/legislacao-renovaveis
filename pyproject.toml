@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "legislacao-renovaveis"
 version = "1.0.0"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Rep0-bit" }]
 
 [project.scripts]
 leis = "src.leis.cli:main"

@@ -68,7 +68,7 @@ def _text_len_for_report(
 ) -> int:
     if used_pdf:
         return len((pdf_excerpt or "").strip())
-    return len((f"{rss_title} {rss_desc}" or "").strip())
+    return len(f"{rss_title} {rss_desc}".strip())
 
 
 def write_report(rows: list[dict[str, Any]]) -> Path:
